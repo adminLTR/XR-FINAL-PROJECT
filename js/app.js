@@ -50,6 +50,64 @@ function price(menu, amount) {
   return `${UI[menu].currency} ${amount}`;
 }
 
+const CART_KEY = "mesa-cart";
+let cartItems = null;
+
+function readCart() {
+  if (cartItems) return cartItems;
+  try {
+    const data = JSON.parse(sessionStorage.getItem(CART_KEY) || "{}");
+    cartItems = Array.isArray(data.items) ? data.items : [];
+  } catch {
+    cartItems = [];
+  }
+  return cartItems;
+}
+
+function writeCart(items) {
+  cartItems = items;
+  try {
+    sessionStorage.setItem(CART_KEY, JSON.stringify({ items }));
+  } catch {
+    /* El pedido sigue en memoria si el navegador bloquea el almacenamiento. */
+  }
+}
+
+function cartQty(menu, dishId) {
+  const item = readCart().find((entry) => entry.menu === menu && entry.id === dishId);
+  return item ? item.qty : 0;
+}
+
+function addToCart(menu, dishId) {
+  const items = readCart();
+  const item = items.find((entry) => entry.menu === menu && entry.id === dishId);
+  if (item) item.qty += 1;
+  else items.push({ menu, id: dishId, qty: 1 });
+  writeCart(items);
+  return item ? item.qty : 1;
+}
+
+function addedLabel(copy, qty) {
+  return copy.added.replace("{n}", String(qty));
+}
+
+function paintAddButton(button, qty) {
+  const count = button.querySelector(".viewer-add-count");
+  if (!count) return;
+  const copy = UI[button.dataset.menu];
+  count.hidden = qty < 1;
+  count.textContent = qty > 0 ? String(qty) : "";
+  button.classList.toggle("is-added", qty > 0);
+  button.setAttribute("aria-label", qty > 0 ? addedLabel(copy, qty) : copy.add);
+}
+
+function tableLabel() {
+  const raw = new URLSearchParams(location.search).get("mesa") || "01";
+  const clean = raw.replace(/[^\dA-Za-z-]/g, "").slice(0, 4);
+  if (!clean) return "01";
+  return /^\d+$/.test(clean) ? clean.padStart(2, "0") : clean;
+}
+
 function render() {
   const { menu, plato } = route();
   const copy = menu ? UI[menu] : null;
@@ -105,7 +163,7 @@ function pickCard(menu) {
     <a class="sheet pick" data-nav data-accent="${menu}" href="${esc(appHref(menu))}">
       <p class="pick-kicker">${esc(copy.language)}</p>
       <h2>${esc(copy.carta)}</h2>
-      <p>${esc(copy.kitchen)} · ${dishCount(menu)} ${menu === "pe" ? "platos" : "pratos"}</p>
+      <p>${esc(copy.kitchen)} · ${dishCount(menu)} ${menu === "pe" ? "platos y bebidas" : "pratos"}</p>
       <p class="pick-names">${esc(names)}</p>
       <span class="pick-go">${menu === "pe" ? "Abrir carta" : "Abrir cardápio"}</span>
     </a>
@@ -144,20 +202,16 @@ function carta(menu) {
 
   return `
     <div class="screen">
-      <article class="sheet sheet-pad" data-accent="${menu}">
-        <header class="mast">
-          <p class="brand">MESA</p>
-          <p class="brand-sub">${esc(copy.brandSub)}</p>
-          <div class="rule" aria-hidden="true"></div>
+      <article class="sheet sheet-pad menu-card" data-accent="${menu}">
+        <header class="mast menu-mast">
+          <p class="resto">${esc(copy.restaurant)}</p>
+          <p class="brand">MESA ${esc(tableLabel())}</p>
+          <div class="flourish" aria-hidden="true"><span></span></div>
           <h1>${esc(copy.carta)}</h1>
           <p class="kitchen">${esc(copy.kitchen)}</p>
-          <p class="hint">${esc(copy.hint)}</p>
         </header>
         ${sections}
-        <footer class="sheet-foot">
-          <p>${esc(copy.country)}</p>
-          <a data-nav href="${esc(appHref(copy.otherHref))}">${esc(copy.otherLabel)}</a>
-        </footer>
+        <button class="order-btn" type="button">${esc(copy.order)}</button>
       </article>
     </div>
   `;
@@ -165,6 +219,7 @@ function carta(menu) {
 
 function viewerMarkup(menu, section, dish) {
   const copy = UI[menu];
+  const qty = cartQty(menu, dish.id);
   const nutrients = copy.nutrients.map((item) => `
     <div>
       <dt>${esc(item.label)}</dt>
@@ -186,10 +241,24 @@ function viewerMarkup(menu, section, dish) {
         <div class="viewer-heading">
           <h1>${esc(dish.name)}</h1>
           <p class="price-lg">${esc(price(menu, dish.price))}</p>
+          <button class="viewer-add${qty ? " is-added" : ""}" type="button" data-action="add-dish" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}" aria-label="${esc(qty ? addedLabel(copy, qty) : copy.add)}">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 2.5 V13.5 M2.5 8 H13.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path></svg>
+            <span class="viewer-add-label">${esc(copy.add)}</span>
+            <span class="viewer-add-count"${qty ? "" : " hidden"}>${qty || ""}</span>
+          </button>
         </div>
-        <p class="portion">${esc(dish.portion)} · ${esc(section.title)}</p>
-        <dl class="nutrition">${nutrients}</dl>
-        <p class="viewer-allergens">${esc(copy.allergensTitle)}: ${dish.allergens.length ? esc(dish.allergens.join(", ")) : esc(copy.noAllergens)}</p>
+        <div class="viewer-facts">
+          <div class="viewer-facts-scroller" data-facts-scroller>
+            <div class="viewer-facts-track">
+              <p class="portion">${esc(dish.portion)} · ${esc(section.title)}</p>
+              <dl class="nutrition">${nutrients}</dl>
+              <p class="viewer-allergens">${esc(copy.allergensTitle)}: ${dish.allergens.length ? esc(dish.allergens.join(", ")) : esc(copy.noAllergens)}</p>
+            </div>
+          </div>
+          <button class="viewer-facts-next" type="button" data-facts-next data-next-label="${esc(copy.factsNext)}" data-back-label="${esc(copy.factsBack)}" aria-label="${esc(copy.factsNext)}" hidden>
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M6 3 L11 8 L6 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
+          </button>
+        </div>
       </div>
     </section>
   `;
@@ -229,6 +298,7 @@ function stopViewer() {
   cancelAnimationFrame(current.frame);
   current.stream?.getTracks().forEach((track) => track.stop());
   current.observer?.disconnect();
+  current.factsObserver?.disconnect();
   window.removeEventListener("pointerup", current.onUp);
   current.renderer?.dispose();
 }
@@ -264,6 +334,7 @@ function mountViewer(menu, dish) {
 
   const view = setupThree(canvas, dish.id, session);
   active = { menu, dishId: dish.id, stream: null, ...view };
+  bindFactsScroller();
   view.start();
 
   request?.then((stream) => {
@@ -287,9 +358,9 @@ function setupThree(canvas, dishId, session) {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 30);
-  camera.position.set(0.85, 2.7, 3.7);
-  camera.lookAt(0, -0.55, 0);
+  const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 40);
+  camera.position.set(0.15, 2.15, 6.4);
+  camera.lookAt(0, 0.18, 0);
 
   scene.add(new THREE.HemisphereLight(0xfff6ea, 0x2a211c, 2.2));
   const key = new THREE.DirectionalLight(0xffffff, 2.6);
@@ -300,11 +371,12 @@ function setupThree(canvas, dishId, session) {
   scene.add(fill);
 
   const model = createDishModel(dishId);
+  model.scale.setScalar(0.36);
   scene.add(model);
 
   const shadow = new THREE.Mesh(
-    new THREE.CircleGeometry(1.2, 40),
-    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.32, depthWrite: false })
+    new THREE.CircleGeometry(0.48, 40),
+    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false })
   );
   shadow.rotation.x = -Math.PI / 2;
   shadow.position.y = 0.01;
@@ -361,6 +433,43 @@ function setupThree(canvas, dishId, session) {
   };
 }
 
+function bindFactsScroller() {
+  const scroller = app.querySelector("[data-facts-scroller]");
+  const button = app.querySelector("[data-facts-next]");
+  if (!scroller || !button || !active) return;
+
+  const maxScroll = () => Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+  const atEnd = () => maxScroll() > 8 && scroller.scrollLeft >= maxScroll() - 12;
+
+  const sync = () => {
+    const overflow = maxScroll() > 8;
+    button.hidden = !overflow;
+    const ended = atEnd();
+    button.classList.toggle("is-back", ended);
+    button.setAttribute("aria-label", ended ? button.dataset.backLabel : button.dataset.nextLabel);
+  };
+
+  button.addEventListener("click", () => {
+    const max = maxScroll();
+    if (atEnd()) {
+      scroller.scrollTo({ left: 0, behavior: "smooth" });
+      button.classList.remove("is-back");
+      button.setAttribute("aria-label", button.dataset.nextLabel);
+      return;
+    }
+    const next = Math.min(max, scroller.scrollLeft + Math.max(112, Math.round(scroller.clientWidth * 0.72)));
+    scroller.scrollTo({ left: next, behavior: "smooth" });
+    const ended = next >= max - 12;
+    button.classList.toggle("is-back", ended);
+    button.setAttribute("aria-label", ended ? button.dataset.backLabel : button.dataset.nextLabel);
+  });
+  scroller.addEventListener("scroll", sync, { passive: true });
+  scroller.addEventListener("scrollend", sync);
+  active.factsObserver = new ResizeObserver(sync);
+  active.factsObserver.observe(scroller);
+  sync();
+}
+
 async function copySlug(button) {
   const url = slugUrl(button.dataset.code);
   const label = button.dataset.label || "Copiar";
@@ -395,6 +504,10 @@ function onClick(event) {
 
   const action = event.target.closest("[data-action]");
   if (action?.dataset.action === "copy-slug") copySlug(action);
+  if (action?.dataset.action === "add-dish") {
+    const qty = addToCart(action.dataset.menu, action.dataset.dish);
+    paintAddButton(action, qty);
+  }
 }
 
 app.addEventListener("click", onClick);

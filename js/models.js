@@ -54,6 +54,12 @@ function shrimp(group, x, y, z, ry = 0) {
   put(group, torus, 0xf08a6a, x, y, z, 0.12, 0.12, 0.12, Math.PI / 2.4, ry, 0.4);
 }
 
+function glass(group, liquid, x = 0, z = 0) {
+  put(group, cyl, 0xf7f4ee, x, 0.62, z, 0.26, 0.72, 0.26);
+  put(group, cyl, liquid, x, 0.52, z, 0.2, 0.5, 0.2);
+  put(group, torus, 0xe7e0d4, x, 0.98, z, 0.22, 0.22, 0.22, Math.PI / 2, 0, 0);
+}
+
 function fries(group, x, z) {
   for (let i = 0; i < 5; i += 1) {
     put(group, box, 0xf2c14a, x + (i - 2) * 0.06, 0.28, z, 0.05, 0.28, 0.08, 0, 0.2 * i, 0.15);
@@ -204,6 +210,24 @@ const builders = {
     put(group, cyl, 0xf0d7a2, 0, 0.36, 0, 0.6, 0.1, 0.48);
     put(group, cyl, 0xc4843a, 0, 0.42, 0, 0.58, 0.03, 0.46);
     put(group, sphere, 0x6f8f45, 0.18, 0.46, 0.08, 0.04, 0.04, 0.04);
+  },
+  "chicha-morada"(group) {
+    glass(group, 0x6a2458);
+    put(group, sphere, 0xf2c14a, 0.1, 0.86, 0.04, 0.05, 0.04, 0.05);
+  },
+  limonada(group) {
+    glass(group, 0xe7f0a8);
+    lime(group, 0.22, 0.22, 0.16);
+  },
+  maracuya(group) {
+    glass(group, 0xe08a2a);
+    put(group, sphere, 0xf2c14a, -0.08, 0.84, 0.04, 0.045, 0.035, 0.045);
+  },
+  "inca-kola"(group) {
+    put(group, cyl, 0xf6d24a, 0, 0.42, 0, 0.22, 0.5, 0.22);
+    put(group, cyl, 0xf3c431, 0, 0.78, 0, 0.1, 0.22, 0.1);
+    put(group, cyl, 0xe2b15a, 0, 0.94, 0, 0.12, 0.06, 0.12);
+    put(group, box, 0x9d2e18, 0, 0.48, 0.2, 0.16, 0.1, 0.01);
   },
   brigadeiro(group) {
     [[-0.22, -0.08], [0.18, -0.12], [-0.08, 0.2], [0.24, 0.16]].forEach(([x, z], index) => {
