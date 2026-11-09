@@ -6,6 +6,20 @@ const app = document.querySelector("#app");
 
 let generation = 0;
 let active = null;
+let arSupport = null;
+
+function queryAR() {
+  if (arSupport) return arSupport;
+  arSupport = (async () => {
+    if (!navigator.xr || typeof navigator.xr.isSessionSupported !== "function") return false;
+    try {
+      return await navigator.xr.isSessionSupported("immersive-ar");
+    } catch {
+      return false;
+    }
+  })();
+  return arSupport;
+}
 
 function esc(value) {
   return String(value)
@@ -22,14 +36,23 @@ function route() {
   return {
     menu: menu === "pe" || menu === "br" ? menu : null,
     plato: plato || null,
+    pedido: params.has("pedido"),
   };
 }
 
-function appHref(menu, plato) {
+function appHref(menu, plato, pedido = false) {
   const url = new URL(location.href);
   url.searchParams.set("menu", menu);
-  if (plato) url.searchParams.set("plato", plato);
-  else url.searchParams.delete("plato");
+  if (pedido) {
+    url.searchParams.set("pedido", "1");
+    url.searchParams.delete("plato");
+  } else if (plato) {
+    url.searchParams.set("plato", plato);
+    url.searchParams.delete("pedido");
+  } else {
+    url.searchParams.delete("plato");
+    url.searchParams.delete("pedido");
+  }
   url.hash = "";
   return `${url.pathname}${url.search}`;
 }
@@ -87,6 +110,53 @@ function addToCart(menu, dishId) {
   return item ? item.qty : 1;
 }
 
+function setCartQty(menu, dishId, qty) {
+  const items = readCart().filter((entry) => !(entry.menu === menu && entry.id === dishId));
+  if (qty > 0) items.push({ menu, id: dishId, qty });
+  writeCart(items);
+  return items;
+}
+
+function cartForMenu(menu) {
+  return readCart().filter((entry) => entry.menu === menu);
+}
+
+function cartItemCount(menu) {
+  return cartForMenu(menu).reduce((sum, entry) => sum + entry.qty, 0);
+}
+
+function cartSubtotal(menu) {
+  return cartForMenu(menu).reduce((sum, entry) => {
+    const found = findDish(menu, entry.id);
+    return sum + (found ? found.dish.price * entry.qty : 0);
+  }, 0);
+}
+
+function clearCartForMenu(menu) {
+  writeCart(readCart().filter((entry) => entry.menu !== menu));
+}
+
+let toastTimer = 0;
+
+function showToast(message) {
+  let toast = document.querySelector(".mesa-toast");
+  if (!toast) {
+    toast = document.createElement("p");
+    toast.className = "mesa-toast";
+    toast.setAttribute("role", "status");
+    toast.hidden = true;
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  toast.hidden = false;
+  toast.classList.add("is-visible");
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toast.classList.remove("is-visible");
+    toast.hidden = true;
+  }, 2400);
+}
+
 function addedLabel(copy, qty) {
   return copy.added.replace("{n}", String(qty));
 }
@@ -109,10 +179,14 @@ function tableLabel() {
 }
 
 function render() {
-  const { menu, plato } = route();
+  const { menu, plato, pedido } = route();
   const copy = menu ? UI[menu] : null;
   document.documentElement.lang = copy ? copy.htmlLang : "es";
-  document.title = copy ? `MESA — ${copy.carta}` : "MESA — Carta aumentada";
+  document.title = copy
+    ? pedido
+      ? `MESA — ${copy.orderTitle}`
+      : `MESA — ${copy.carta}`
+    : "MESA — Carta aumentada";
 
   const found = menu && plato ? findDish(menu, plato) : null;
   const sameDish = found && active && active.menu === menu && active.dishId === found.dish.id && app.querySelector(".viewer");
@@ -121,6 +195,7 @@ function render() {
   stopViewer();
 
   if (!menu) app.innerHTML = landing();
+  else if (pedido) app.innerHTML = pedidoView(menu);
   else if (plato && !found) app.innerHTML = missing(menu);
   else if (found) app.innerHTML = viewerMarkup(menu, found.section, found.dish);
   else app.innerHTML = carta(menu);
@@ -211,7 +286,77 @@ function carta(menu) {
           <p class="kitchen">${esc(copy.kitchen)}</p>
         </header>
         ${sections}
-        <button class="order-btn" type="button">${esc(copy.order)}</button>
+        <button class="order-btn" type="button" data-action="view-order" data-menu="${esc(menu)}">
+          <span>${esc(copy.viewOrder)}</span>
+          ${cartItemCount(menu) ? `<span class="order-badge" aria-hidden="true">${cartItemCount(menu)}</span>` : ""}
+        </button>
+      </article>
+    </div>
+  `;
+}
+
+function pedidoView(menu) {
+  const copy = UI[menu];
+  const items = cartForMenu(menu);
+  const lines = items.map((entry) => {
+    const found = findDish(menu, entry.id);
+    if (!found) return "";
+    const { dish } = found;
+    const lineTotal = dish.price * entry.qty;
+    return `
+      <li class="order-line" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}">
+        <div class="order-line-main">
+          <span class="order-line-name">${esc(dish.name)}</span>
+          <span class="order-line-price">${esc(price(menu, lineTotal))}</span>
+        </div>
+        <div class="order-line-qty" aria-label="${esc(dish.name)}">
+          <button type="button" class="order-qty-btn" data-action="cart-dec" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}" aria-label="−">−</button>
+          <span class="order-qty-val">${entry.qty}</span>
+          <button type="button" class="order-qty-btn" data-action="cart-inc" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}" aria-label="+">+</button>
+        </div>
+      </li>
+    `;
+  }).join("");
+  const total = cartSubtotal(menu);
+  const empty = items.length === 0;
+
+  return `
+    <div class="screen">
+      <article class="sheet sheet-pad order-sheet" data-accent="${menu}">
+        <a class="back" data-nav href="${esc(appHref(menu))}">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
+          ${esc(copy.back)}
+        </a>
+        <p class="eyebrow">MESA ${esc(tableLabel())}</p>
+        <h1 class="dish-title">${esc(copy.orderTitle)}</h1>
+        ${empty
+    ? `<p class="desc order-empty">${esc(copy.orderEmpty)}</p>`
+    : `
+          <ul class="order-list">${lines}</ul>
+          <div class="order-footer">
+            <p class="order-total-row">
+              <span>${esc(copy.orderTotal)}</span>
+              <strong>${esc(price(menu, total))}</strong>
+            </p>
+            <button class="order-btn order-btn-place" type="button" data-action="place-order" data-menu="${esc(menu)}">${esc(copy.placeOrder)}</button>
+          </div>
+        `}
+      </article>
+    </div>
+  `;
+}
+
+function pedidoPlacedView(menu) {
+  const copy = UI[menu];
+  return `
+    <div class="screen">
+      <article class="sheet sheet-pad order-sheet" data-accent="${menu}">
+        <a class="back" data-nav href="${esc(appHref(menu))}">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
+          ${esc(copy.back)}
+        </a>
+        <h1 class="dish-title">${esc(copy.orderPlacedTitle)}</h1>
+        <p class="desc">${esc(copy.orderPlacedBody)}</p>
       </article>
     </div>
   `;
@@ -229,14 +374,19 @@ function viewerMarkup(menu, section, dish) {
 
   return `
     <section class="viewer" data-accent="${menu}">
-      <video class="viewer-video" autoplay playsinline muted></video>
       <canvas class="viewer-canvas" data-model="${esc(dish.id)}" aria-label="${esc(dish.name)}"></canvas>
+      <div class="viewer-overlay">
       <a class="viewer-back" data-nav href="${esc(appHref(menu))}">
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
         ${esc(copy.back)}
       </a>
-      <p class="viewer-hint">${esc(copy.spinHint)}</p>
+      <button class="viewer-order" type="button" data-action="view-order" data-menu="${esc(menu)}">
+        <span>${esc(copy.viewOrder)}</span>
+        ${cartItemCount(menu) ? `<span class="viewer-order-badge" aria-hidden="true">${cartItemCount(menu)}</span>` : ""}
+      </button>
+      <p class="viewer-hint">${esc(copy.scanReady)}</p>
       <p class="viewer-alert" hidden></p>
+      <button class="viewer-scan" type="button" data-action="start-ar" hidden>${esc(copy.scan)}</button>
       <div class="viewer-card">
         <div class="viewer-heading">
           <h1>${esc(dish.name)}</h1>
@@ -260,6 +410,7 @@ function viewerMarkup(menu, section, dish) {
           </button>
         </div>
       </div>
+      </div>
     </section>
   `;
 }
@@ -277,17 +428,20 @@ function missing(menu) {
   `;
 }
 
-function cameraErrorMessage(error, copy) {
-  if (!window.isSecureContext) return copy.cameraInsecure;
-  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
-    return copy.cameraUnavailable;
-  }
+function arErrorMessage(error, copy) {
+  if (!window.isSecureContext) return copy.arInsecure;
   const name = error && error.name;
-  if (name === "NotAllowedError" || name === "PermissionDeniedError") return copy.cameraDenied;
-  if (name === "NotFoundError" || name === "DevicesNotFoundError" || name === "OverconstrainedError") {
-    return copy.cameraMissing;
+  if (name === "NotAllowedError" || name === "SecurityError") return copy.arDenied;
+  return copy.arFailed;
+}
+
+function cancelSource(source) {
+  if (!source) return;
+  try {
+    source.cancel();
+  } catch {
+    /* La fuente de hit test ya estaba cancelada. */
   }
-  return copy.cameraFailed;
 }
 
 function stopViewer() {
@@ -295,11 +449,19 @@ function stopViewer() {
   const current = active;
   active = null;
   if (!current) return;
+  current.renderer?.setAnimationLoop(null);
   cancelAnimationFrame(current.frame);
-  current.stream?.getTracks().forEach((track) => track.stop());
+  cancelSource(current.hitTestSource);
+  cancelSource(current.transientSource);
+  current.hitTestSource = null;
+  current.transientSource = null;
+  const session = current.session;
+  current.session = null;
+  session?.end().catch(() => {});
   current.observer?.disconnect();
   current.factsObserver?.disconnect();
   window.removeEventListener("pointerup", current.onUp);
+  window.clearTimeout(current.alertTimer);
   current.renderer?.dispose();
 }
 
@@ -308,46 +470,205 @@ function showViewerAlert(text) {
   if (!alert) return;
   alert.hidden = false;
   alert.textContent = text;
+  window.clearTimeout(active?.alertTimer);
+  if (!active) return;
+  active.alertTimer = window.setTimeout(() => {
+    alert.hidden = true;
+  }, 2600);
+}
+
+function setViewerHint(text) {
+  const hint = app.querySelector(".viewer-hint");
+  if (hint) hint.textContent = text;
 }
 
 function mountViewer(menu, dish) {
-  const session = generation;
+  const token = generation;
   const copy = UI[menu];
-  const video = app.querySelector(".viewer-video");
   const canvas = app.querySelector(".viewer-canvas");
-  if (!video || !canvas) return;
+  if (!canvas) return;
 
-  video.playsInline = true;
-  let request = null;
-  if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === "function") {
-    request = navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-      },
-    });
-  } else {
-    showViewerAlert(cameraErrorMessage(null, copy));
-  }
-
-  const view = setupThree(canvas, dish.id, session);
-  active = { menu, dishId: dish.id, stream: null, ...view };
+  const view = setupThree(canvas, dish.id, token);
+  view.menu = menu;
+  view.dishId = dish.id;
+  active = view;
   bindFactsScroller();
   view.start();
 
-  request?.then((stream) => {
-    if (generation !== session || !active) {
-      stream.getTracks().forEach((track) => track.stop());
+  queryAR().then((supported) => {
+    if (generation !== token || active !== view) return;
+    view.arReady = supported;
+    const scan = app.querySelector(".viewer-scan");
+    if (supported) {
+      if (scan) scan.hidden = false;
+      setViewerHint(copy.scanReady);
       return;
     }
-    active.stream = stream;
-    video.srcObject = stream;
-    video.play().catch(() => {});
+    if (scan) scan.hidden = true;
+    setViewerHint(`${copy.arUnsupported} ${copy.spinHint}`);
+  });
+}
+
+function isHorizontalSurface(matrix) {
+  return matrix[5] > 0.75;
+}
+
+function setDishScale(view, scale) {
+  view.model.scale.setScalar(scale);
+  const shadowScale = scale / 0.36;
+  view.shadow.scale.set(shadowScale, shadowScale, shadowScale);
+}
+
+function showStudio(view) {
+  view.studio = true;
+  view.surfaceSeen = false;
+  view.placed.matrixAutoUpdate = true;
+  view.placed.position.set(0, 0, 0);
+  view.placed.rotation.set(0, 0, 0);
+  view.placed.scale.set(1, 1, 1);
+  view.placed.visible = true;
+  setDishScale(view, 0.36);
+  view.reticle.visible = false;
+  view.camera.position.set(0.15, 2.15, 6.4);
+  view.camera.lookAt(0, 0.18, 0);
+  view.resize();
+}
+
+function putDish(view, matrix) {
+  setDishScale(view, 0.12);
+  view.placed.matrixAutoUpdate = false;
+  view.placed.matrix.fromArray(matrix);
+  view.placed.visible = true;
+}
+
+function finishSession(view) {
+  cancelSource(view.hitTestSource);
+  cancelSource(view.transientSource);
+  view.hitTestSource = null;
+  view.transientSource = null;
+  view.session = null;
+  view.starting = false;
+  view.renderer.setAnimationLoop(null);
+  if (active !== view) return;
+  showStudio(view);
+  const scan = app.querySelector(".viewer-scan");
+  if (scan) scan.hidden = false;
+  setViewerHint(UI[view.menu].scanReady);
+  view.start();
+}
+
+function drawXR(view, copy, frame) {
+  if (!frame || active !== view) return;
+  const refSpace = view.renderer.xr.getReferenceSpace();
+  if (!refSpace) return;
+
+  view.reticle.visible = false;
+  if (view.hitTestSource) {
+    const hits = frame.getHitTestResults(view.hitTestSource);
+    const pose = hits[0]?.getPose(refSpace);
+    if (pose && isHorizontalSurface(pose.transform.matrix)) {
+      view.reticle.visible = true;
+      view.reticle.matrix.fromArray(pose.transform.matrix);
+      if (!view.surfaceSeen) {
+        view.surfaceSeen = true;
+        setViewerHint(copy.placeHint);
+      }
+    }
+  }
+
+  if (view.suppressPlace) {
+    view.suppressPlace = false;
+  } else if (view.transientSource) {
+    const inputs = frame.getHitTestResultsForTransientInput(view.transientSource);
+    for (const input of inputs) {
+      const pose = input.results?.[0]?.getPose(refSpace);
+      if (!pose) {
+        showViewerAlert(copy.missHint);
+        continue;
+      }
+      if (!isHorizontalSurface(pose.transform.matrix)) {
+        showViewerAlert(copy.wallHint);
+        continue;
+      }
+      putDish(view, pose.transform.matrix);
+      setViewerHint(copy.placedHint);
+    }
+  } else if (view.placeAtReticle) {
+    view.placeAtReticle = false;
+    if (view.reticle.visible) {
+      putDish(view, view.reticle.matrix.elements);
+      setViewerHint(copy.placedHint);
+    } else {
+      showViewerAlert(copy.missHint);
+    }
+  }
+
+  view.renderer.render(view.scene, view.camera);
+}
+
+function beginScan() {
+  const view = active;
+  if (!view || view.session || view.starting || !view.arReady) return;
+  const copy = UI[view.menu];
+  const overlay = app.querySelector(".viewer-overlay");
+  view.starting = true;
+  view.model.rotation.y = 0;
+  let pending;
+  try {
+    pending = navigator.xr.requestSession("immersive-ar", {
+      requiredFeatures: ["local", "hit-test"],
+      optionalFeatures: ["dom-overlay"],
+      domOverlay: overlay ? { root: overlay } : undefined,
+    });
+  } catch (error) {
+    view.starting = false;
+    showViewerAlert(arErrorMessage(error, copy));
+    return;
+  }
+
+  pending.then(async (session) => {
+    if (active !== view) {
+      session.end().catch(() => {});
+      return;
+    }
+    view.session = session;
+    view.starting = false;
+    session.addEventListener("end", () => finishSession(view));
+    cancelAnimationFrame(view.frame);
+    view.studio = false;
+    view.placed.visible = false;
+    view.reticle.visible = false;
+    view.surfaceSeen = false;
+    view.renderer.xr.enabled = true;
+    view.renderer.xr.setReferenceSpaceType("local");
+    await view.renderer.xr.setSession(session);
+    if (active !== view) return;
+
+    const viewerSpace = await session.requestReferenceSpace("viewer");
+    view.hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+    try {
+      view.transientSource = await session.requestHitTestSourceForTransientInput({
+        profile: "generic-touchscreen",
+      });
+    } catch {
+      view.transientSource = null;
+      session.addEventListener("select", () => {
+        view.placeAtReticle = true;
+      });
+    }
+    if (active !== view) return;
+
+    const scan = app.querySelector(".viewer-scan");
+    if (scan) scan.hidden = true;
+    setViewerHint(copy.scanHint);
+    view.renderer.setAnimationLoop((time, frame) => drawXR(view, copy, frame));
   }).catch((error) => {
-    if (generation !== session) return;
-    showViewerAlert(cameraErrorMessage(error, copy));
+    const session = view.session;
+    view.starting = false;
+    view.session = null;
+    session?.end().catch(() => {});
+    if (active !== view) return;
+    showViewerAlert(arErrorMessage(error, copy));
   });
 }
 
@@ -372,7 +693,6 @@ function setupThree(canvas, dishId, session) {
 
   const model = createDishModel(dishId);
   model.scale.setScalar(0.36);
-  scene.add(model);
 
   const shadow = new THREE.Mesh(
     new THREE.CircleGeometry(0.48, 40),
@@ -380,9 +700,24 @@ function setupThree(canvas, dishId, session) {
   );
   shadow.rotation.x = -Math.PI / 2;
   shadow.position.y = 0.01;
-  scene.add(shadow);
+
+  const placed = new THREE.Group();
+  placed.add(model);
+  placed.add(shadow);
+  scene.add(placed);
+
+  const ring = new THREE.RingGeometry(0.075, 0.1, 48);
+  ring.rotateX(-Math.PI / 2);
+  const reticle = new THREE.Mesh(
+    ring,
+    new THREE.MeshBasicMaterial({ color: 0xf0c27a, side: THREE.DoubleSide, depthWrite: false })
+  );
+  reticle.matrixAutoUpdate = false;
+  reticle.visible = false;
+  scene.add(reticle);
 
   function resize() {
+    if (renderer.xr.isPresenting) return;
     const width = canvas.clientWidth || 1;
     const height = canvas.clientHeight || 1;
     renderer.setSize(width, height, false);
@@ -402,7 +737,7 @@ function setupThree(canvas, dishId, session) {
     canvas.setPointerCapture?.(event.pointerId);
   });
   canvas.addEventListener("pointermove", (event) => {
-    if (!dragging) return;
+    if (!dragging || !view.studio) return;
     model.rotation.y += (event.clientX - lastX) * 0.012;
     lastX = event.clientX;
   });
@@ -412,25 +747,35 @@ function setupThree(canvas, dishId, session) {
   window.addEventListener("pointerup", onUp);
 
   let frame = 0;
+  const view = {
+    renderer,
+    scene,
+    camera,
+    model,
+    shadow,
+    placed,
+    reticle,
+    observer,
+    onUp,
+    resize,
+    studio: true,
+    arReady: false,
+    frame: 0,
+    start() {
+      frame = requestAnimationFrame(tick);
+      view.frame = frame;
+    },
+  };
+
   function tick() {
-    if (generation !== session) return;
+    if (generation !== session || !view.studio) return;
     if (!dragging && !reduceMotion) model.rotation.y += 0.005;
     renderer.render(scene, camera);
     frame = requestAnimationFrame(tick);
-    if (active) active.frame = frame;
+    view.frame = frame;
   }
 
-  return {
-    renderer,
-    observer,
-    onUp,
-    get frame() {
-      return frame;
-    },
-    start() {
-      frame = requestAnimationFrame(tick);
-    },
-  };
+  return view;
 }
 
 function bindFactsScroller() {
@@ -502,11 +847,42 @@ function onClick(event) {
     return;
   }
 
+  if (active?.session && event.target.closest(".viewer-back, .viewer-card, .viewer-scan, .viewer-order")) {
+    active.suppressPlace = true;
+  }
+
   const action = event.target.closest("[data-action]");
   if (action?.dataset.action === "copy-slug") copySlug(action);
+  if (action?.dataset.action === "start-ar") beginScan();
   if (action?.dataset.action === "add-dish") {
-    const qty = addToCart(action.dataset.menu, action.dataset.dish);
+    const { menu, dish } = action.dataset;
+    const qty = addToCart(menu, dish);
     paintAddButton(action, qty);
+    showToast(UI[menu].addedToast);
+  }
+  if (action?.dataset.action === "view-order") {
+    event.preventDefault();
+    history.pushState({}, "", appHref(action.dataset.menu, null, true));
+    render();
+    return;
+  }
+  if (action?.dataset.action === "cart-inc") {
+    const qty = cartQty(action.dataset.menu, action.dataset.dish) + 1;
+    setCartQty(action.dataset.menu, action.dataset.dish, qty);
+    render();
+    return;
+  }
+  if (action?.dataset.action === "cart-dec") {
+    const qty = cartQty(action.dataset.menu, action.dataset.dish) - 1;
+    setCartQty(action.dataset.menu, action.dataset.dish, qty);
+    render();
+    return;
+  }
+  if (action?.dataset.action === "place-order") {
+    clearCartForMenu(action.dataset.menu);
+    app.innerHTML = pedidoPlacedView(action.dataset.menu);
+    window.scrollTo(0, 0);
+    return;
   }
 }
 
