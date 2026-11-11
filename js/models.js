@@ -26,6 +26,179 @@ const cone = new THREE.ConeGeometry(1, 1, 24);
 const torus = new THREE.TorusGeometry(1, 0.22, 8, 18);
 const rim = new THREE.TorusGeometry(1.16, 0.04, 8, 48);
 
+function lathe(points, segments = 64) {
+  return new THREE.LatheGeometry(
+    points.map(([radius, y]) => new THREE.Vector2(radius, y)),
+    segments
+  );
+}
+
+function canvasTexture(canvas) {
+  const texture = new THREE.CanvasTexture(canvas);
+  if (THREE.SRGBColorSpace) texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 8;
+  return texture;
+}
+
+let incaBottle = null;
+
+function incaBottleParts() {
+  if (incaBottle) return incaBottle;
+
+  const labelCanvas = document.createElement("canvas");
+  labelCanvas.width = 1024;
+  labelCanvas.height = 360;
+  const label = labelCanvas.getContext("2d");
+  label.fillStyle = "#1a4fbf";
+  label.fillRect(0, 0, 1024, 360);
+  [256, 768].forEach((x) => {
+    const glow = label.createRadialGradient(x, 180, 8, x, 180, 150);
+    glow.addColorStop(0, "rgba(255, 236, 120, 0.2)");
+    glow.addColorStop(1, "rgba(255, 236, 120, 0)");
+    label.fillStyle = glow;
+    label.fillRect(x - 170, 20, 340, 320);
+  });
+  label.fillStyle = "#ffe14a";
+  label.textAlign = "center";
+  label.textBaseline = "middle";
+  label.font = "800 104px Arial";
+  [256, 768].forEach((x) => {
+    label.fillText("INCA", x, 132);
+    label.fillText("KOLA", x, 236);
+  });
+
+  const gripCanvas = document.createElement("canvas");
+  gripCanvas.width = 256;
+  gripCanvas.height = 32;
+  const grip = gripCanvas.getContext("2d");
+  for (let i = 0; i < 48; i += 1) {
+    grip.fillStyle = i % 2 ? "#c5ced8" : "#f4f7fb";
+    grip.fillRect(i * 6, 0, 6, 32);
+  }
+
+  const plastic = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.05,
+    metalness: 0.04,
+    transparent: true,
+    opacity: 0.16,
+    depthWrite: false,
+  });
+  const soda = new THREE.MeshStandardMaterial({
+    color: 0xffe34a,
+    roughness: 0.22,
+    metalness: 0.02,
+    emissive: 0xf0c400,
+    emissiveIntensity: 0.12,
+  });
+  const labelMaterial = new THREE.MeshStandardMaterial({
+    map: canvasTexture(labelCanvas),
+    roughness: 0.38,
+    metalness: 0.02,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
+  });
+  const capSide = new THREE.MeshStandardMaterial({
+    map: canvasTexture(gripCanvas),
+    roughness: 0.32,
+    metalness: 0.18,
+    transparent: true,
+    opacity: 0.92,
+  });
+  const capTop = new THREE.MeshStandardMaterial({
+    color: 0xe7edf3,
+    roughness: 0.28,
+    metalness: 0.2,
+  });
+  const shine = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.2,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const neckGlass = new THREE.MeshStandardMaterial({
+    color: 0xf3f6f8,
+    roughness: 0.08,
+    metalness: 0.08,
+    transparent: true,
+    opacity: 0.62,
+    depthWrite: false,
+  });
+  const collarMaterial = new THREE.MeshStandardMaterial({ color: 0xf7f9fc, roughness: 0.4 });
+
+  incaBottle = {
+    shell: lathe([
+      [0.11, 0.02],
+      [0.16, 0.06],
+      [0.188, 0.14],
+      [0.178, 0.28],
+      [0.15, 0.4],
+      [0.132, 0.5],
+      [0.15, 0.6],
+      [0.172, 0.7],
+      [0.176, 0.9],
+      [0.168, 1.0],
+      [0.13, 1.1],
+      [0.084, 1.2],
+      [0.058, 1.28],
+      [0.054, 1.46],
+      [0.068, 1.49],
+      [0.058, 1.51],
+      [0.001, 1.518],
+    ]),
+    liquid: lathe([
+      [0.001, 0.045],
+      [0.12, 0.06],
+      [0.168, 0.14],
+      [0.158, 0.28],
+      [0.132, 0.4],
+      [0.116, 0.5],
+      [0.134, 0.6],
+      [0.154, 0.72],
+      [0.158, 0.92],
+      [0.14, 1.04],
+      [0.09, 1.14],
+      [0.05, 1.24],
+      [0.02, 1.3],
+      [0.001, 1.308],
+    ]),
+    sleeve: lathe([
+      [0.182, 0.66],
+      [0.186, 0.74],
+      [0.184, 0.9],
+    ], 72),
+    collar: lathe([
+      [0.18, 0.9],
+      [0.176, 0.99],
+    ], 48),
+    neckShell: lathe([
+      [0.078, 1.16],
+      [0.058, 1.28],
+      [0.052, 1.46],
+      [0.07, 1.492],
+      [0.056, 1.514],
+    ], 40),
+    shine: new THREE.CylinderGeometry(0.19, 0.16, 0.95, 36, 1, true, 0.55, 0.32),
+    cap: new THREE.CylinderGeometry(0.078, 0.084, 0.12, 32),
+    band: new THREE.CylinderGeometry(0.088, 0.088, 0.03, 32),
+    foot: new THREE.SphereGeometry(1, 18, 12),
+    rib: new THREE.BoxGeometry(0.012, 0.32, 0.02),
+    neck: new THREE.TorusGeometry(0.062, 0.007, 8, 28),
+    surface: new THREE.CircleGeometry(0.042, 24),
+    plastic,
+    soda,
+    labelMaterial,
+    capSide,
+    capTop,
+    shineMaterial: shine,
+    neckGlass,
+    collarMaterial,
+  };
+  return incaBottle;
+}
+
 function plate() {
   const group = new THREE.Group();
   put(group, cyl, 0xf7f1e6, 0, 0.04, 0, 1.16, 0.06, 1.16);
@@ -224,10 +397,81 @@ const builders = {
     put(group, sphere, 0xf2c14a, -0.08, 0.84, 0.04, 0.045, 0.035, 0.045);
   },
   "inca-kola"(group) {
-    put(group, cyl, 0xf6d24a, 0, 0.42, 0, 0.22, 0.5, 0.22);
-    put(group, cyl, 0xf3c431, 0, 0.78, 0, 0.1, 0.22, 0.1);
-    put(group, cyl, 0xe2b15a, 0, 0.94, 0, 0.12, 0.06, 0.12);
-    put(group, box, 0x9d2e18, 0, 0.48, 0.2, 0.16, 0.1, 0.01);
+    const parts = incaBottleParts();
+    const bottle = new THREE.Group();
+    bottle.scale.setScalar(2);
+
+    const liquid = new THREE.Mesh(parts.liquid, parts.soda);
+    bottle.add(liquid);
+    for (let i = 0; i < 5; i += 1) {
+      const angle = (i / 5) * Math.PI * 2;
+      const foot = new THREE.Mesh(parts.foot, parts.soda);
+      foot.position.set(Math.sin(angle) * 0.09, 0.07, Math.cos(angle) * 0.09);
+      foot.scale.set(0.078, 0.042, 0.1);
+      foot.rotation.y = -angle;
+      bottle.add(foot);
+    }
+
+    const surface = new THREE.Mesh(
+      parts.surface,
+      new THREE.MeshStandardMaterial({ color: 0xfff4b0, roughness: 0.18, metalness: 0.08, side: THREE.DoubleSide })
+    );
+    surface.rotation.x = -Math.PI / 2;
+    surface.position.y = 1.3;
+    bottle.add(surface);
+
+    const sleeve = new THREE.Mesh(parts.sleeve, parts.labelMaterial);
+    sleeve.rotation.y = -Math.PI / 2;
+    sleeve.renderOrder = 1;
+    bottle.add(sleeve);
+    const collar = new THREE.Mesh(parts.collar, parts.collarMaterial);
+    collar.renderOrder = 1;
+    bottle.add(collar);
+    const neck = new THREE.Mesh(parts.neckShell, parts.neckGlass);
+    neck.renderOrder = 2;
+    bottle.add(neck);
+
+    const shell = new THREE.Mesh(parts.shell, parts.plastic);
+    shell.renderOrder = 2;
+    bottle.add(shell);
+    for (let i = 0; i < 5; i += 1) {
+      const angle = (i / 5) * Math.PI * 2;
+      const foot = new THREE.Mesh(parts.foot, parts.plastic);
+      foot.position.set(Math.sin(angle) * 0.09, 0.07, Math.cos(angle) * 0.09);
+      foot.scale.set(0.09, 0.05, 0.112);
+      foot.rotation.y = -angle;
+      foot.renderOrder = 2;
+      bottle.add(foot);
+    }
+    for (let i = 0; i < 8; i += 1) {
+      const angle = (i / 8) * Math.PI * 2 + 0.2;
+      const rib = new THREE.Mesh(parts.rib, parts.plastic);
+      rib.position.set(Math.sin(angle) * 0.168, 0.28, Math.cos(angle) * 0.168);
+      rib.rotation.y = -angle;
+      rib.renderOrder = 2;
+      bottle.add(rib);
+    }
+    [1.22, 1.34].forEach((y) => {
+      const ring = new THREE.Mesh(parts.neck, parts.plastic);
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = y;
+      ring.renderOrder = 2;
+      bottle.add(ring);
+    });
+
+    const gleam = new THREE.Mesh(parts.shine, parts.shineMaterial);
+    gleam.position.y = 0.72;
+    gleam.renderOrder = 3;
+    bottle.add(gleam);
+
+    const cap = new THREE.Mesh(parts.cap, [parts.capSide, parts.capTop, parts.capTop]);
+    cap.position.y = 1.585;
+    bottle.add(cap);
+    const band = new THREE.Mesh(parts.band, parts.capTop);
+    band.position.y = 1.51;
+    bottle.add(band);
+
+    group.add(bottle);
   },
   brigadeiro(group) {
     [[-0.22, -0.08], [0.18, -0.12], [-0.08, 0.2], [0.24, 0.16]].forEach(([x, z], index) => {

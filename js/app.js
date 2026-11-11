@@ -4,6 +4,11 @@ import { createDishModel } from "./models.js";
 
 const app = document.querySelector("#app");
 
+const _hitPos = new THREE.Vector3();
+const _hitQuat = new THREE.Quaternion();
+const _hitScale = new THREE.Vector3();
+const _hitEuler = new THREE.Euler();
+
 let generation = 0;
 let active = null;
 let arSupport = null;
@@ -452,9 +457,8 @@ function stopViewer() {
   current.renderer?.setAnimationLoop(null);
   cancelAnimationFrame(current.frame);
   cancelSource(current.hitTestSource);
-  cancelSource(current.transientSource);
   current.hitTestSource = null;
-  current.transientSource = null;
+  current.overlay?.removeEventListener("pointerdown", current.onPlacePointer);
   const session = current.session;
   current.session = null;
   session?.end().catch(() => {});
@@ -513,6 +517,10 @@ function isHorizontalSurface(matrix) {
   return matrix[5] > 0.75;
 }
 
+function isHudEvent(event) {
+  return Boolean(event.target.closest("button, a, input, select, label, .viewer-card"));
+}
+
 function setDishScale(view, scale) {
   view.model.scale.setScalar(scale);
   const shadowScale = scale / 0.36;
@@ -522,6 +530,8 @@ function setDishScale(view, scale) {
 function showStudio(view) {
   view.studio = true;
   view.surfaceSeen = false;
+  view.dishPlaced = false;
+  view.blockedSurface = false;
   view.placed.matrixAutoUpdate = true;
   view.placed.position.set(0, 0, 0);
   view.placed.rotation.set(0, 0, 0);
@@ -534,18 +544,37 @@ function showStudio(view) {
   view.resize();
 }
 
-function putDish(view, matrix) {
+function placeDishFromReticle(view) {
+  if (!view.reticle.visible || view.dishPlaced) return false;
+  view.reticle.matrix.decompose(_hitPos, _hitQuat, _hitScale);
+  _hitEuler.setFromQuaternion(_hitQuat, "YXZ");
+  view.placed.matrixAutoUpdate = true;
+  view.placed.position.copy(_hitPos);
+  view.placed.rotation.set(0, _hitEuler.y, 0);
+  view.placed.scale.set(1, 1, 1);
+  view.placed.updateMatrix();
+  view.placed.updateMatrixWorld(true);
   setDishScale(view, 0.12);
-  view.placed.matrixAutoUpdate = false;
-  view.placed.matrix.fromArray(matrix);
   view.placed.visible = true;
+  view.dishPlaced = true;
+  view.reticle.visible = false;
+  return true;
+}
+
+function tryPlaceDish(view, copy) {
+  if (!view.session || view.dishPlaced) return;
+  if (!view.reticle.visible) {
+    showViewerAlert(view.blockedSurface ? copy.wallHint : copy.missHint);
+    return;
+  }
+  if (placeDishFromReticle(view)) setViewerHint(copy.placedHint);
 }
 
 function finishSession(view) {
   cancelSource(view.hitTestSource);
-  cancelSource(view.transientSource);
   view.hitTestSource = null;
-  view.transientSource = null;
+  view.hitTestSourceRequested = false;
+  view.overlay?.removeEventListener("pointerdown", view.onPlacePointer);
   view.session = null;
   view.starting = false;
   view.renderer.setAnimationLoop(null);
@@ -557,52 +586,42 @@ function finishSession(view) {
   view.start();
 }
 
+function updateHitTest(view, copy, frame) {
+  if (view.dishPlaced) {
+    view.reticle.visible = false;
+    return;
+  }
+  if (!view.hitTestSource) return;
+
+  const referenceSpace = view.renderer.xr.getReferenceSpace();
+  if (!referenceSpace) return;
+
+  const hitTestResults = frame.getHitTestResults(view.hitTestSource);
+  if (!hitTestResults.length) {
+    view.reticle.visible = false;
+    view.blockedSurface = false;
+    return;
+  }
+
+  const pose = hitTestResults[0].getPose(referenceSpace);
+  if (!pose || !isHorizontalSurface(pose.transform.matrix)) {
+    view.reticle.visible = false;
+    view.blockedSurface = Boolean(pose);
+    return;
+  }
+
+  view.blockedSurface = false;
+  view.reticle.visible = true;
+  view.reticle.matrix.fromArray(pose.transform.matrix);
+  if (!view.surfaceSeen) {
+    view.surfaceSeen = true;
+    setViewerHint(copy.placeHint);
+  }
+}
+
 function drawXR(view, copy, frame) {
   if (!frame || active !== view) return;
-  const refSpace = view.renderer.xr.getReferenceSpace();
-  if (!refSpace) return;
-
-  view.reticle.visible = false;
-  if (view.hitTestSource) {
-    const hits = frame.getHitTestResults(view.hitTestSource);
-    const pose = hits[0]?.getPose(refSpace);
-    if (pose && isHorizontalSurface(pose.transform.matrix)) {
-      view.reticle.visible = true;
-      view.reticle.matrix.fromArray(pose.transform.matrix);
-      if (!view.surfaceSeen) {
-        view.surfaceSeen = true;
-        setViewerHint(copy.placeHint);
-      }
-    }
-  }
-
-  if (view.suppressPlace) {
-    view.suppressPlace = false;
-  } else if (view.transientSource) {
-    const inputs = frame.getHitTestResultsForTransientInput(view.transientSource);
-    for (const input of inputs) {
-      const pose = input.results?.[0]?.getPose(refSpace);
-      if (!pose) {
-        showViewerAlert(copy.missHint);
-        continue;
-      }
-      if (!isHorizontalSurface(pose.transform.matrix)) {
-        showViewerAlert(copy.wallHint);
-        continue;
-      }
-      putDish(view, pose.transform.matrix);
-      setViewerHint(copy.placedHint);
-    }
-  } else if (view.placeAtReticle) {
-    view.placeAtReticle = false;
-    if (view.reticle.visible) {
-      putDish(view, view.reticle.matrix.elements);
-      setViewerHint(copy.placedHint);
-    } else {
-      showViewerAlert(copy.missHint);
-    }
-  }
-
+  updateHitTest(view, copy, frame);
   view.renderer.render(view.scene, view.camera);
 }
 
@@ -616,7 +635,7 @@ function beginScan() {
   let pending;
   try {
     pending = navigator.xr.requestSession("immersive-ar", {
-      requiredFeatures: ["local", "hit-test"],
+      requiredFeatures: ["hit-test"],
       optionalFeatures: ["dom-overlay"],
       domOverlay: overlay ? { root: overlay } : undefined,
     });
@@ -636,27 +655,42 @@ function beginScan() {
     session.addEventListener("end", () => finishSession(view));
     cancelAnimationFrame(view.frame);
     view.studio = false;
+    view.dishPlaced = false;
     view.placed.visible = false;
     view.reticle.visible = false;
     view.surfaceSeen = false;
+    view.blockedSurface = false;
+    view.lastPointerAt = 0;
     view.renderer.xr.enabled = true;
     view.renderer.xr.setReferenceSpaceType("local");
     await view.renderer.xr.setSession(session);
     if (active !== view) return;
 
+    view.hitTestSourceRequested = true;
     const viewerSpace = await session.requestReferenceSpace("viewer");
+    if (view.session !== session) return;
     view.hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
-    try {
-      view.transientSource = await session.requestHitTestSourceForTransientInput({
-        profile: "generic-touchscreen",
-      });
-    } catch {
-      view.transientSource = null;
-      session.addEventListener("select", () => {
-        view.placeAtReticle = true;
-      });
-    }
     if (active !== view) return;
+
+    view.onPlacePointer = (event) => {
+      if (!view.session) return;
+      if (isHudEvent(event)) {
+        view.lastPointerAt = performance.now();
+        view.suppressPlace = true;
+        return;
+      }
+      view.lastPointerAt = performance.now();
+      tryPlaceDish(view, copy);
+    };
+    view.overlay = overlay;
+    overlay?.addEventListener("pointerdown", view.onPlacePointer);
+    session.addEventListener("select", () => {
+      if (view.suppressPlace || performance.now() - view.lastPointerAt < 400) {
+        view.suppressPlace = false;
+        return;
+      }
+      tryPlaceDish(view, copy);
+    });
 
     const scan = app.querySelector(".viewer-scan");
     if (scan) scan.hidden = true;
