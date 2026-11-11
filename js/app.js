@@ -4,10 +4,20 @@ import { createDishModel } from "./models.js";
 
 const app = document.querySelector("#app");
 
+const RETICLE_SCAN = 0xffcc33;
+const RETICLE_READY = 0x3ddc6a;
+const OCCLUSION_COLS = 48;
+const OCCLUSION_ROWS = 36;
+
 const _hitPos = new THREE.Vector3();
 const _hitQuat = new THREE.Quaternion();
 const _hitScale = new THREE.Vector3();
 const _hitEuler = new THREE.Euler();
+const _searchPos = new THREE.Vector3();
+const _searchQuat = new THREE.Quaternion();
+const _viewFromDepth = new THREE.Matrix4();
+const _eyeWorld = new THREE.Matrix4();
+const _occlPoint = new THREE.Vector3();
 
 let generation = 0;
 let active = null;
@@ -458,7 +468,11 @@ function stopViewer() {
   cancelAnimationFrame(current.frame);
   cancelSource(current.hitTestSource);
   current.hitTestSource = null;
+  current.anchor?.delete?.();
+  current.anchor = null;
   current.overlay?.removeEventListener("pointerdown", current.onPlacePointer);
+  current.occluder?.geometry.dispose();
+  current.occluder?.material.dispose();
   const session = current.session;
   current.session = null;
   session?.end().catch(() => {});
@@ -517,6 +531,41 @@ function isHorizontalSurface(matrix) {
   return matrix[5] > 0.75;
 }
 
+function createOccluder() {
+  const positions = new Float32Array(OCCLUSION_COLS * OCCLUSION_ROWS * 3);
+  const indices = new Uint16Array((OCCLUSION_COLS - 1) * (OCCLUSION_ROWS - 1) * 6);
+  let n = 0;
+  for (let y = 0; y < OCCLUSION_ROWS - 1; y += 1) {
+    for (let x = 0; x < OCCLUSION_COLS - 1; x += 1) {
+      const a = y * OCCLUSION_COLS + x;
+      indices[n] = a;
+      indices[n + 1] = a + OCCLUSION_COLS;
+      indices[n + 2] = a + 1;
+      indices[n + 3] = a + 1;
+      indices[n + 4] = a + OCCLUSION_COLS;
+      indices[n + 5] = a + OCCLUSION_COLS + 1;
+      n += 6;
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+  const mesh = new THREE.Mesh(
+    geometry,
+    new THREE.MeshBasicMaterial({
+      colorWrite: false,
+      depthWrite: true,
+      depthTest: true,
+      side: THREE.DoubleSide,
+    })
+  );
+  mesh.frustumCulled = false;
+  mesh.renderOrder = -1000;
+  mesh.visible = false;
+  mesh.name = "occluder";
+  return mesh;
+}
+
 function isHudEvent(event) {
   return Boolean(event.target.closest("button, a, input, select, label, .viewer-card"));
 }
@@ -530,8 +579,13 @@ function setDishScale(view, scale) {
 function showStudio(view) {
   view.studio = true;
   view.surfaceSeen = false;
+  view.surfaceValid = false;
   view.dishPlaced = false;
+  view.placing = false;
+  view.placeRequested = false;
   view.blockedSurface = false;
+  view.anchor?.delete?.();
+  view.anchor = null;
   view.placed.matrixAutoUpdate = true;
   view.placed.position.set(0, 0, 0);
   view.placed.rotation.set(0, 0, 0);
@@ -539,41 +593,116 @@ function showStudio(view) {
   view.placed.visible = true;
   setDishScale(view, 0.36);
   view.reticle.visible = false;
+  view.reticle.material.color.setHex(RETICLE_SCAN);
+  if (view.occluder) view.occluder.visible = false;
+  if (view.gpuOccluder) {
+    view.scene.remove(view.gpuOccluder);
+    view.gpuOccluder = null;
+  }
   view.camera.position.set(0.15, 2.15, 6.4);
   view.camera.lookAt(0, 0.18, 0);
   view.resize();
 }
 
-function placeDishFromReticle(view) {
-  if (!view.reticle.visible || view.dishPlaced) return false;
-  view.reticle.matrix.decompose(_hitPos, _hitQuat, _hitScale);
+function applyLockedMatrix(view, matrix) {
+  _eyeWorld.fromArray(matrix);
+  _eyeWorld.decompose(_hitPos, _hitQuat, _hitScale);
   _hitEuler.setFromQuaternion(_hitQuat, "YXZ");
+  view.lockedYaw = _hitEuler.y;
   view.placed.matrixAutoUpdate = true;
   view.placed.position.copy(_hitPos);
-  view.placed.rotation.set(0, _hitEuler.y, 0);
+  view.placed.rotation.set(0, view.lockedYaw, 0);
   view.placed.scale.set(1, 1, 1);
   view.placed.updateMatrix();
-  view.placed.updateMatrixWorld(true);
-  setDishScale(view, 0.12);
-  view.placed.visible = true;
-  view.dishPlaced = true;
-  view.reticle.visible = false;
-  return true;
 }
 
-function tryPlaceDish(view, copy) {
-  if (!view.session || view.dishPlaced) return;
-  if (!view.reticle.visible) {
-    showViewerAlert(view.blockedSurface ? copy.wallHint : copy.missHint);
+function showSearchReticle(view) {
+  const xrCam = view.renderer.xr.getCamera();
+  xrCam.updateMatrixWorld(true);
+  _searchPos.set(0, 0, -0.55).applyMatrix4(xrCam.matrixWorld);
+  _searchQuat.setFromRotationMatrix(xrCam.matrixWorld);
+  view.reticle.matrixAutoUpdate = true;
+  view.reticle.position.copy(_searchPos);
+  view.reticle.quaternion.copy(_searchQuat);
+  view.reticle.rotateX(Math.PI / 2);
+  view.reticle.scale.set(1, 1, 1);
+  view.reticle.visible = true;
+  view.reticle.material.color.setHex(RETICLE_SCAN);
+  view.surfaceValid = false;
+}
+
+function placeReticle(view, matrix, valid) {
+  _eyeWorld.fromArray(matrix);
+  _eyeWorld.decompose(view.reticle.position, view.reticle.quaternion, _hitScale);
+  view.reticle.matrixAutoUpdate = true;
+  view.reticle.scale.set(1, 1, 1);
+  if (valid) view.reticle.position.y += 0.004;
+  view.reticle.visible = true;
+  view.reticle.material.color.setHex(valid ? RETICLE_READY : RETICLE_SCAN);
+  view.surfaceValid = valid;
+}
+
+function lockDish(view, copy, hit, referenceSpace) {
+  if (view.dishPlaced || view.placing) return;
+  const pose = hit.getPose(referenceSpace);
+  if (!pose || !isHorizontalSurface(pose.transform.matrix)) return;
+  const snapshot = new Float32Array(pose.transform.matrix);
+  view.placing = true;
+  view.dishPlaced = true;
+  view.surfaceValid = false;
+  view.reticle.visible = false;
+  applyLockedMatrix(view, snapshot);
+  setDishScale(view, 0.12);
+  view.placed.visible = true;
+  setViewerHint(copy.placedHint);
+  const done = () => {
+    view.placing = false;
+  };
+  if (typeof hit.createAnchor === "function") {
+    hit.createAnchor().then((anchor) => {
+      if (active !== view || !view.session || !view.dishPlaced) {
+        anchor.delete?.();
+        done();
+        return;
+      }
+      view.anchor = anchor;
+      done();
+    }).catch(() => done());
     return;
   }
-  if (placeDishFromReticle(view)) setViewerHint(copy.placedHint);
+  done();
+}
+
+function stickDish(view, frame) {
+  if (!view.dishPlaced || !view.anchor || !frame) return;
+  const referenceSpace = view.renderer.xr.getReferenceSpace();
+  if (!referenceSpace) return;
+  const pose = frame.getPose(view.anchor.anchorSpace, referenceSpace);
+  if (!pose) return;
+  _eyeWorld.fromArray(pose.transform.matrix);
+  _eyeWorld.decompose(_hitPos, _hitQuat, _hitScale);
+  _hitEuler.setFromQuaternion(_hitQuat, "YXZ");
+  if (view.placed.position.distanceToSquared(_hitPos) > 0.0004) view.placed.position.copy(_hitPos);
+  const yawDelta = Math.atan2(
+    Math.sin(_hitEuler.y - view.placed.rotation.y),
+    Math.cos(_hitEuler.y - view.placed.rotation.y)
+  );
+  if (Math.abs(yawDelta) > 0.05) view.placed.rotation.y = _hitEuler.y;
+  view.placed.scale.set(1, 1, 1);
+  view.placed.updateMatrix();
+}
+
+function tryPlaceDish(view) {
+  if (!view.session || view.dishPlaced || view.placing) return;
+  view.placeRequested = true;
 }
 
 function finishSession(view) {
   cancelSource(view.hitTestSource);
   view.hitTestSource = null;
   view.hitTestSourceRequested = false;
+  view.anchor?.delete?.();
+  view.anchor = null;
   view.overlay?.removeEventListener("pointerdown", view.onPlacePointer);
   view.session = null;
   view.starting = false;
@@ -589,39 +718,148 @@ function finishSession(view) {
 function updateHitTest(view, copy, frame) {
   if (view.dishPlaced) {
     view.reticle.visible = false;
-    return;
+    view.surfaceValid = false;
+    return null;
   }
-  if (!view.hitTestSource) return;
 
   const referenceSpace = view.renderer.xr.getReferenceSpace();
-  if (!referenceSpace) return;
-
-  const hitTestResults = frame.getHitTestResults(view.hitTestSource);
-  if (!hitTestResults.length) {
-    view.reticle.visible = false;
+  if (!view.hitTestSource || !referenceSpace) {
     view.blockedSurface = false;
-    return;
+    showSearchReticle(view);
+    return null;
   }
 
-  const pose = hitTestResults[0].getPose(referenceSpace);
-  if (!pose || !isHorizontalSurface(pose.transform.matrix)) {
-    view.reticle.visible = false;
-    view.blockedSurface = Boolean(pose);
-    return;
+  const hit = frame.getHitTestResults(view.hitTestSource)[0];
+  const pose = hit?.getPose(referenceSpace);
+  if (!pose) {
+    view.blockedSurface = false;
+    showSearchReticle(view);
+    if (view.surfaceSeen) {
+      view.surfaceSeen = false;
+      setViewerHint(copy.scanHint);
+    }
+    return null;
   }
 
-  view.blockedSurface = false;
-  view.reticle.visible = true;
-  view.reticle.matrix.fromArray(pose.transform.matrix);
-  if (!view.surfaceSeen) {
+  const valid = isHorizontalSurface(pose.transform.matrix);
+  view.blockedSurface = !valid;
+  placeReticle(view, pose.transform.matrix, valid);
+  if (valid && !view.surfaceSeen) {
     view.surfaceSeen = true;
     setViewerHint(copy.placeHint);
+  } else if (!valid && view.surfaceSeen) {
+    view.surfaceSeen = false;
+    setViewerHint(copy.scanHint);
   }
+  return valid ? hit : null;
+}
+
+function updateCpuOcclusion(view, depthInfo, xrView) {
+  const mesh = view.occluder;
+  const positions = mesh.geometry.attributes.position.array;
+  const width = depthInfo.width;
+  const height = depthInfo.height;
+  const mapping = depthInfo.normDepthBufferFromNormView?.matrix;
+  if (mapping) {
+    _viewFromDepth.fromArray(mapping);
+    if (Math.abs(_viewFromDepth.determinant()) > 1e-8) _viewFromDepth.invert();
+    else _viewFromDepth.identity();
+  } else {
+    _viewFromDepth.identity();
+  }
+  _eyeWorld.fromArray(xrView.transform.matrix);
+  const proj = xrView.projectionMatrix;
+  const p00 = proj[0];
+  const p11 = proj[5];
+  const p02 = proj[8];
+  const p12 = proj[9];
+  if (!p00 || !p11) return;
+
+  let ptr = 0;
+  for (let y = 0; y < OCCLUSION_ROWS; y += 1) {
+    const dv = (y + 0.5) / OCCLUSION_ROWS;
+    for (let x = 0; x < OCCLUSION_COLS; x += 1) {
+      const du = (x + 0.5) / OCCLUSION_COLS;
+      const sx = Math.min(width - 1, Math.max(0, Math.round(du * (width - 1))));
+      const sy = Math.min(height - 1, Math.max(0, Math.round(dv * (height - 1))));
+      let meters = 0;
+      try {
+        meters = depthInfo.getDepthInMeters(sx, sy);
+      } catch {
+        meters = 0;
+      }
+      if (!Number.isFinite(meters) || meters < 0.08 || meters > 4.5) meters = 6;
+      else meters += 0.03;
+
+      _occlPoint.set(du, dv, 0).applyMatrix4(_viewFromDepth);
+      const ndcX = _occlPoint.x * 2 - 1;
+      const ndcY = 1 - _occlPoint.y * 2;
+      const viewX = (meters * (ndcX + p02)) / p00;
+      const viewY = (meters * (ndcY + p12)) / p11;
+      _occlPoint.set(viewX, viewY, -meters).applyMatrix4(_eyeWorld);
+      positions[ptr] = _occlPoint.x;
+      positions[ptr + 1] = _occlPoint.y;
+      positions[ptr + 2] = _occlPoint.z;
+      ptr += 3;
+    }
+  }
+
+  mesh.geometry.attributes.position.needsUpdate = true;
+  mesh.position.set(0, 0, 0);
+  mesh.quaternion.identity();
+  mesh.scale.set(1, 1, 1);
+  mesh.updateMatrix();
+  mesh.visible = true;
+}
+
+function updateOcclusion(view, frame) {
+  const referenceSpace = view.renderer.xr.getReferenceSpace();
+  if (!referenceSpace) return;
+  const pose = frame.getViewerPose(referenceSpace);
+  const xrView = pose?.views?.[0];
+  if (!xrView) return;
+
+  let depth = null;
+  try {
+    depth = frame.getDepthInformation(xrView);
+  } catch {
+    depth = null;
+  }
+
+  if (depth && typeof depth.getDepthInMeters === "function") {
+    updateCpuOcclusion(view, depth, xrView);
+    if (view.gpuOccluder) view.gpuOccluder.visible = false;
+    return;
+  }
+
+  if (!view.renderer.xr.hasDepthSensing?.()) return;
+  const gpu = view.renderer.xr.getDepthSensingMesh?.();
+  if (!gpu) return;
+  if (view.gpuOccluder !== gpu) {
+    gpu.material.colorWrite = false;
+    gpu.material.depthWrite = true;
+    gpu.material.depthTest = true;
+    gpu.material.side = THREE.DoubleSide;
+    gpu.frustumCulled = false;
+    gpu.renderOrder = -1000;
+    view.scene.add(gpu);
+    view.gpuOccluder = gpu;
+  }
+  gpu.visible = true;
+  view.occluder.visible = false;
 }
 
 function drawXR(view, copy, frame) {
   if (!frame || active !== view) return;
-  updateHitTest(view, copy, frame);
+  const hit = updateHitTest(view, copy, frame);
+  if (view.placeRequested && !view.dishPlaced && !view.placing) {
+    view.placeRequested = false;
+    const referenceSpace = view.renderer.xr.getReferenceSpace();
+    if (hit && referenceSpace) lockDish(view, copy, hit, referenceSpace);
+    else showViewerAlert(view.blockedSurface ? copy.wallHint : copy.missHint);
+  }
+  stickDish(view, frame);
+  updateOcclusion(view, frame);
   view.renderer.render(view.scene, view.camera);
 }
 
@@ -634,10 +872,23 @@ function beginScan() {
   view.model.rotation.y = 0;
   let pending;
   try {
-    pending = navigator.xr.requestSession("immersive-ar", {
+    const sessionInit = {
       requiredFeatures: ["hit-test"],
-      optionalFeatures: ["dom-overlay"],
+      optionalFeatures: ["dom-overlay", "depth-sensing", "anchors"],
+      depthSensing: {
+        usagePreference: ["cpu-optimized", "gpu-optimized"],
+        dataFormatPreference: ["float32", "luminance-alpha"],
+      },
       domOverlay: overlay ? { root: overlay } : undefined,
+    };
+    pending = navigator.xr.requestSession("immersive-ar", sessionInit).catch((error) => {
+      if (error?.name === "NotAllowedError" || error?.name === "SecurityError") throw error;
+      const fallback = {
+        requiredFeatures: ["hit-test"],
+        optionalFeatures: ["dom-overlay"],
+        domOverlay: overlay ? { root: overlay } : undefined,
+      };
+      return navigator.xr.requestSession("immersive-ar", fallback);
     });
   } catch (error) {
     view.starting = false;
@@ -659,7 +910,10 @@ function beginScan() {
     view.placed.visible = false;
     view.reticle.visible = false;
     view.surfaceSeen = false;
+    view.surfaceValid = false;
     view.blockedSurface = false;
+    view.placeRequested = false;
+    view.placing = false;
     view.lastPointerAt = 0;
     view.renderer.xr.enabled = true;
     view.renderer.xr.setReferenceSpaceType("local");
@@ -680,7 +934,7 @@ function beginScan() {
         return;
       }
       view.lastPointerAt = performance.now();
-      tryPlaceDish(view, copy);
+      tryPlaceDish(view);
     };
     view.overlay = overlay;
     overlay?.addEventListener("pointerdown", view.onPlacePointer);
@@ -689,7 +943,7 @@ function beginScan() {
         view.suppressPlace = false;
         return;
       }
-      tryPlaceDish(view, copy);
+      tryPlaceDish(view);
     });
 
     const scan = app.querySelector(".viewer-scan");
@@ -740,15 +994,18 @@ function setupThree(canvas, dishId, session) {
   placed.add(shadow);
   scene.add(placed);
 
-  const ring = new THREE.RingGeometry(0.075, 0.1, 48);
+  const ring = new THREE.RingGeometry(0.07, 0.105, 48);
   ring.rotateX(-Math.PI / 2);
   const reticle = new THREE.Mesh(
     ring,
-    new THREE.MeshBasicMaterial({ color: 0xf0c27a, side: THREE.DoubleSide, depthWrite: false })
+    new THREE.MeshBasicMaterial({ color: RETICLE_SCAN, side: THREE.DoubleSide, depthWrite: false })
   );
-  reticle.matrixAutoUpdate = false;
   reticle.visible = false;
+  reticle.renderOrder = 2;
   scene.add(reticle);
+
+  const occluder = createOccluder();
+  scene.add(occluder);
 
   function resize() {
     if (renderer.xr.isPresenting) return;
@@ -789,6 +1046,7 @@ function setupThree(canvas, dishId, session) {
     shadow,
     placed,
     reticle,
+    occluder,
     observer,
     onUp,
     resize,
