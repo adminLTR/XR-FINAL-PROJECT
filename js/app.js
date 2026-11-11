@@ -6,8 +6,8 @@ const app = document.querySelector("#app");
 
 const RETICLE_SCAN = 0xffcc33;
 const RETICLE_READY = 0x3ddc6a;
-const OCCLUSION_COLS = 48;
-const OCCLUSION_ROWS = 36;
+const OCCLUSION_COLS = 32;
+const OCCLUSION_ROWS = 24;
 
 const _hitPos = new THREE.Vector3();
 const _hitQuat = new THREE.Quaternion();
@@ -531,6 +531,32 @@ function isHorizontalSurface(matrix) {
   return matrix[5] > 0.75;
 }
 
+function guardDepthBinding() {
+  if (typeof XRWebGLBinding === "undefined") return;
+  const proto = XRWebGLBinding.prototype;
+  if (proto.__mesaDepthGuard || typeof proto.getDepthInformation !== "function") return;
+  const original = proto.getDepthInformation;
+  proto.getDepthInformation = function guardedDepthInformation(view) {
+    try {
+      return original.call(this, view);
+    } catch {
+      return null;
+    }
+  };
+  proto.__mesaDepthGuard = true;
+}
+
+function hideDepthFromRenderer(session) {
+  const features = session.enabledFeatures;
+  if (!features?.includes("depth-sensing")) return;
+  const visible = features.filter((feature) => feature !== "depth-sensing");
+  try {
+    Object.defineProperty(session, "enabledFeatures", { get: () => visible });
+  } catch {
+    /* El navegador no deja ocultar la función; el guard de WebGL cubre la llamada. */
+  }
+}
+
 function createOccluder() {
   const positions = new Float32Array(OCCLUSION_COLS * OCCLUSION_ROWS * 3);
   const indices = new Uint16Array((OCCLUSION_COLS - 1) * (OCCLUSION_ROWS - 1) * 6);
@@ -659,15 +685,19 @@ function lockDish(view, copy, hit, referenceSpace) {
     view.placing = false;
   };
   if (typeof hit.createAnchor === "function") {
-    hit.createAnchor().then((anchor) => {
-      if (active !== view || !view.session || !view.dishPlaced) {
-        anchor.delete?.();
+    try {
+      hit.createAnchor().then((anchor) => {
+        if (active !== view || !view.session || !view.dishPlaced) {
+          anchor.delete?.();
+          done();
+          return;
+        }
+        view.anchor = anchor;
         done();
-        return;
-      }
-      view.anchor = anchor;
+      }).catch(() => done());
+    } catch {
       done();
-    }).catch(() => done());
+    }
     return;
   }
   done();
@@ -754,11 +784,34 @@ function updateHitTest(view, copy, frame) {
   return valid ? hit : null;
 }
 
+function depthSamples(depthInfo) {
+  const width = depthInfo.width | 0;
+  const height = depthInfo.height | 0;
+  const count = width * height;
+  if (!count) return null;
+  const scale = depthInfo.rawValueToMeters > 0 ? depthInfo.rawValueToMeters : 1;
+  const raw = depthInfo.data;
+  if (raw instanceof ArrayBuffer && raw.byteLength >= count * 4) {
+    return { values: new Float32Array(raw), scale, width, height };
+  }
+  if (ArrayBuffer.isView(raw) && raw.BYTES_PER_ELEMENT === 4 && raw.length >= count) {
+    return { values: raw, scale, width, height };
+  }
+  return null;
+}
+
+function sampleDepth(depthInfo, packed, x, y) {
+  if (packed) return packed.values[y * packed.width + x] * packed.scale;
+  if (typeof depthInfo.getDepthInMeters !== "function") return 0;
+  return depthInfo.getDepthInMeters(x, y);
+}
+
 function updateCpuOcclusion(view, depthInfo, xrView) {
   const mesh = view.occluder;
   const positions = mesh.geometry.attributes.position.array;
-  const width = depthInfo.width;
-  const height = depthInfo.height;
+  const width = depthInfo.width | 0;
+  const height = depthInfo.height | 0;
+  if (width < 2 || height < 2) return;
   const mapping = depthInfo.normDepthBufferFromNormView?.matrix;
   if (mapping) {
     _viewFromDepth.fromArray(mapping);
@@ -775,19 +828,16 @@ function updateCpuOcclusion(view, depthInfo, xrView) {
   const p12 = proj[9];
   if (!p00 || !p11) return;
 
+  const packed = depthSamples(depthInfo);
   let ptr = 0;
+  let finite = 0;
   for (let y = 0; y < OCCLUSION_ROWS; y += 1) {
     const dv = (y + 0.5) / OCCLUSION_ROWS;
     for (let x = 0; x < OCCLUSION_COLS; x += 1) {
       const du = (x + 0.5) / OCCLUSION_COLS;
       const sx = Math.min(width - 1, Math.max(0, Math.round(du * (width - 1))));
       const sy = Math.min(height - 1, Math.max(0, Math.round(dv * (height - 1))));
-      let meters = 0;
-      try {
-        meters = depthInfo.getDepthInMeters(sx, sy);
-      } catch {
-        meters = 0;
-      }
+      let meters = sampleDepth(depthInfo, packed, sx, sy);
       if (!Number.isFinite(meters) || meters < 0.08 || meters > 4.5) meters = 6;
       else meters += 0.03;
 
@@ -796,10 +846,17 @@ function updateCpuOcclusion(view, depthInfo, xrView) {
       const ndcY = 1 - _occlPoint.y * 2;
       const viewX = (meters * (ndcX + p02)) / p00;
       const viewY = (meters * (ndcY + p12)) / p11;
-      _occlPoint.set(viewX, viewY, -meters).applyMatrix4(_eyeWorld);
-      positions[ptr] = _occlPoint.x;
-      positions[ptr + 1] = _occlPoint.y;
-      positions[ptr + 2] = _occlPoint.z;
+      if (!Number.isFinite(viewX) || !Number.isFinite(viewY)) {
+        positions[ptr] = 0;
+        positions[ptr + 1] = 0;
+        positions[ptr + 2] = 0;
+      } else {
+        _occlPoint.set(viewX, viewY, -meters).applyMatrix4(_eyeWorld);
+        positions[ptr] = _occlPoint.x;
+        positions[ptr + 1] = _occlPoint.y;
+        positions[ptr + 2] = _occlPoint.z;
+        finite += 1;
+      }
       ptr += 3;
     }
   }
@@ -809,57 +866,48 @@ function updateCpuOcclusion(view, depthInfo, xrView) {
   mesh.quaternion.identity();
   mesh.scale.set(1, 1, 1);
   mesh.updateMatrix();
-  mesh.visible = true;
+  mesh.visible = finite > OCCLUSION_COLS;
 }
 
 function updateOcclusion(view, frame) {
+  if (view.occlusionFailed) return;
   const referenceSpace = view.renderer.xr.getReferenceSpace();
   if (!referenceSpace) return;
   const pose = frame.getViewerPose(referenceSpace);
   const xrView = pose?.views?.[0];
-  if (!xrView) return;
+  if (!xrView || typeof frame.getDepthInformation !== "function") return;
 
   let depth = null;
   try {
     depth = frame.getDepthInformation(xrView);
   } catch {
-    depth = null;
-  }
-
-  if (depth && typeof depth.getDepthInMeters === "function") {
-    updateCpuOcclusion(view, depth, xrView);
-    if (view.gpuOccluder) view.gpuOccluder.visible = false;
     return;
   }
-
-  if (!view.renderer.xr.hasDepthSensing?.()) return;
-  const gpu = view.renderer.xr.getDepthSensingMesh?.();
-  if (!gpu) return;
-  if (view.gpuOccluder !== gpu) {
-    gpu.material.colorWrite = false;
-    gpu.material.depthWrite = true;
-    gpu.material.depthTest = true;
-    gpu.material.side = THREE.DoubleSide;
-    gpu.frustumCulled = false;
-    gpu.renderOrder = -1000;
-    view.scene.add(gpu);
-    view.gpuOccluder = gpu;
-  }
-  gpu.visible = true;
-  view.occluder.visible = false;
+  if (!depth || (typeof depth.getDepthInMeters !== "function" && !depth.data)) return;
+  updateCpuOcclusion(view, depth, xrView);
 }
 
 function drawXR(view, copy, frame) {
   if (!frame || active !== view) return;
-  const hit = updateHitTest(view, copy, frame);
-  if (view.placeRequested && !view.dishPlaced && !view.placing) {
-    view.placeRequested = false;
-    const referenceSpace = view.renderer.xr.getReferenceSpace();
-    if (hit && referenceSpace) lockDish(view, copy, hit, referenceSpace);
-    else showViewerAlert(view.blockedSurface ? copy.wallHint : copy.missHint);
+  try {
+    const hit = updateHitTest(view, copy, frame);
+    if (view.placeRequested && !view.dishPlaced && !view.placing) {
+      view.placeRequested = false;
+      const referenceSpace = view.renderer.xr.getReferenceSpace();
+      if (hit && referenceSpace) lockDish(view, copy, hit, referenceSpace);
+      else showViewerAlert(view.blockedSurface ? copy.wallHint : copy.missHint);
+    }
+    stickDish(view, frame);
+    try {
+      updateOcclusion(view, frame);
+    } catch (error) {
+      view.occlusionFailed = true;
+      if (view.occluder) view.occluder.visible = false;
+      console.warn("Oclusión desactivada", error);
+    }
+  } catch (error) {
+    console.warn("Frame AR", error);
   }
-  stickDish(view, frame);
-  updateOcclusion(view, frame);
   view.renderer.render(view.scene, view.camera);
 }
 
@@ -876,8 +924,8 @@ function beginScan() {
       requiredFeatures: ["hit-test"],
       optionalFeatures: ["dom-overlay", "depth-sensing", "anchors"],
       depthSensing: {
-        usagePreference: ["cpu-optimized", "gpu-optimized"],
-        dataFormatPreference: ["float32", "luminance-alpha"],
+        usagePreference: ["cpu-optimized"],
+        dataFormatPreference: ["float32"],
       },
       domOverlay: overlay ? { root: overlay } : undefined,
     };
@@ -903,6 +951,8 @@ function beginScan() {
     }
     view.session = session;
     view.starting = false;
+    guardDepthBinding();
+    hideDepthFromRenderer(session);
     session.addEventListener("end", () => finishSession(view));
     cancelAnimationFrame(view.frame);
     view.studio = false;
