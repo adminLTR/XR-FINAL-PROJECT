@@ -592,6 +592,66 @@ function createOccluder() {
   return mesh;
 }
 
+function createDepthQuad() {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array([
+    -1, -1, 0,
+    3, -1, 0,
+    -1, 3, 0,
+  ]), 3));
+  const depthTexture = new THREE.DataArrayTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 1);
+  depthTexture.generateMipmaps = false;
+  depthTexture.flipY = false;
+  depthTexture.magFilter = THREE.NearestFilter;
+  depthTexture.minFilter = THREE.NearestFilter;
+  depthTexture.wrapS = THREE.ClampToEdgeWrapping;
+  depthTexture.wrapT = THREE.ClampToEdgeWrapping;
+  depthTexture.needsUpdate = false;
+  depthTexture.version = 0;
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      uDepth: { value: depthTexture },
+      uViewToDepth: { value: new THREE.Matrix4() },
+      uViewport: { value: new THREE.Vector4(0, 0, 1, 1) },
+    },
+    vertexShader: `
+      attribute vec3 position;
+      void main() {
+        gl_Position = vec4(position.xy, 0.0, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp sampler2DArray;
+      uniform sampler2DArray uDepth;
+      uniform mat4 uViewToDepth;
+      uniform vec4 uViewport;
+      void main() {
+        vec2 normView = vec2(
+          (gl_FragCoord.x - uViewport.x) / uViewport.z,
+          1.0 - (gl_FragCoord.y - uViewport.y) / uViewport.w
+        );
+        vec2 depthUv = clamp((uViewToDepth * vec4(normView, 0.0, 1.0)).xy, 0.0, 1.0);
+        float d = texture(uDepth, vec3(depthUv, 0.0)).r;
+        if (d <= 0.0) discard;
+        gl_FragColor = vec4(0.0);
+        gl_FragDepth = min(d + 0.002, 1.0);
+      }
+    `,
+    depthTest: true,
+    depthWrite: true,
+    depthFunc: THREE.AlwaysDepth,
+    colorWrite: false,
+    toneMapped: false,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = -1000;
+  mesh.visible = false;
+  mesh.name = "depthQuad";
+  mesh.userData.depthTexture = depthTexture;
+  return mesh;
+}
+
 function isHudEvent(event) {
   return Boolean(event.target.closest("button, a, input, select, label, .viewer-card"));
 }
@@ -621,6 +681,9 @@ function showStudio(view) {
   view.reticle.visible = false;
   view.reticle.material.color.setHex(RETICLE_SCAN);
   if (view.occluder) view.occluder.visible = false;
+  if (view.depthQuad) view.depthQuad.visible = false;
+  view.gpuDepth = null;
+  view.depthBinding = undefined;
   if (view.gpuOccluder) {
     view.scene.remove(view.gpuOccluder);
     view.gpuOccluder = null;
@@ -838,8 +901,8 @@ function updateCpuOcclusion(view, depthInfo, xrView) {
       const sx = Math.min(width - 1, Math.max(0, Math.round(du * (width - 1))));
       const sy = Math.min(height - 1, Math.max(0, Math.round(dv * (height - 1))));
       let meters = sampleDepth(depthInfo, packed, sx, sy);
-      if (!Number.isFinite(meters) || meters < 0.08 || meters > 4.5) meters = 6;
-      else meters += 0.03;
+      if (!Number.isFinite(meters) || meters <= 0 || meters > 8) meters = 8;
+      else meters += 0.015;
 
       _occlPoint.set(du, dv, 0).applyMatrix4(_viewFromDepth);
       const ndcX = _occlPoint.x * 2 - 1;
@@ -869,19 +932,57 @@ function updateCpuOcclusion(view, depthInfo, xrView) {
   mesh.visible = finite > OCCLUSION_COLS;
 }
 
-function updateOcclusion(view, frame) {
+function depthBinding(view) {
+  if (view.depthBinding || view.depthBinding === null) return view.depthBinding;
+  if (typeof XRWebGLBinding === "undefined" || !view.session) {
+    view.depthBinding = null;
+    return null;
+  }
+  try {
+    view.depthBinding = new XRWebGLBinding(view.session, view.renderer.getContext());
+  } catch {
+    view.depthBinding = null;
+  }
+  return view.depthBinding;
+}
+
+function gpuDepthInfo(view, xrView) {
+  if (view.session.depthUsage === "cpu-optimized") return null;
+  const binding = depthBinding(view);
+  if (!binding || typeof binding.getDepthInformation !== "function") return null;
+  try {
+    const info = binding.getDepthInformation(xrView);
+    if (info?.texture && info.isValid !== false) return info;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function prepareOcclusion(view, frame) {
   if (view.occlusionFailed) return;
+  view.gpuDepth = null;
   const referenceSpace = view.renderer.xr.getReferenceSpace();
   if (!referenceSpace) return;
   const pose = frame.getViewerPose(referenceSpace);
   const xrView = pose?.views?.[0];
-  if (!xrView || typeof frame.getDepthInformation !== "function") return;
+  if (!xrView) return;
 
+  const gpu = gpuDepthInfo(view, xrView);
+  if (gpu) {
+    view.gpuDepth = gpu;
+    view.depthQuad.visible = true;
+    view.occluder.visible = false;
+    return;
+  }
+
+  view.depthQuad.visible = false;
+  if (typeof frame.getDepthInformation !== "function") return;
   let depth = null;
   try {
     depth = frame.getDepthInformation(xrView);
   } catch {
-    return;
+    depth = null;
   }
   if (!depth || (typeof depth.getDepthInMeters !== "function" && !depth.data)) return;
   updateCpuOcclusion(view, depth, xrView);
@@ -899,7 +1000,7 @@ function drawXR(view, copy, frame) {
     }
     stickDish(view, frame);
     try {
-      updateOcclusion(view, frame);
+      prepareOcclusion(view, frame);
     } catch (error) {
       view.occlusionFailed = true;
       if (view.occluder) view.occluder.visible = false;
@@ -924,8 +1025,8 @@ function beginScan() {
       requiredFeatures: ["hit-test"],
       optionalFeatures: ["dom-overlay", "depth-sensing", "anchors"],
       depthSensing: {
-        usagePreference: ["cpu-optimized"],
-        dataFormatPreference: ["float32"],
+        usagePreference: ["gpu-optimized", "cpu-optimized"],
+        dataFormatPreference: ["luminance-alpha", "float32"],
       },
       domOverlay: overlay ? { root: overlay } : undefined,
     };
@@ -1056,6 +1157,8 @@ function setupThree(canvas, dishId, session) {
 
   const occluder = createOccluder();
   scene.add(occluder);
+  const depthQuad = createDepthQuad();
+  scene.add(depthQuad);
 
   function resize() {
     if (renderer.xr.isPresenting) return;
@@ -1097,6 +1200,7 @@ function setupThree(canvas, dishId, session) {
     placed,
     reticle,
     occluder,
+    depthQuad,
     observer,
     onUp,
     resize,
@@ -1107,6 +1211,22 @@ function setupThree(canvas, dishId, session) {
       frame = requestAnimationFrame(tick);
       view.frame = frame;
     },
+  };
+
+  const depthTexture = depthQuad.userData.depthTexture;
+  depthQuad.onBeforeRender = (activeRenderer) => {
+    const info = view.gpuDepth;
+    if (!info?.texture) return;
+    const props = activeRenderer.properties.get(depthTexture);
+    props.__webglTexture = info.texture;
+    props.__version = depthTexture.version;
+    const gl = activeRenderer.getContext();
+    const vp = gl.getParameter(gl.VIEWPORT);
+    const uniforms = depthQuad.material.uniforms;
+    uniforms.uViewport.value.set(vp[0], vp[1], Math.max(vp[2], 1), Math.max(vp[3], 1));
+    const mapping = info.normDepthBufferFromNormView?.matrix;
+    if (mapping) uniforms.uViewToDepth.value.fromArray(mapping);
+    else uniforms.uViewToDepth.value.identity();
   };
 
   function tick() {
