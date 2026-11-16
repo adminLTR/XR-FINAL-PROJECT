@@ -6,6 +6,7 @@ const app = document.querySelector("#app");
 
 const RETICLE_SCAN = 0xffcc33;
 const RETICLE_READY = 0x3ddc6a;
+const RETICLE_BLOCK = 0xe05a3c;
 /** Vista previa (antes de escanear). */
 const DISH_SCALE_PREVIEW = 1;
 /** Tamaño anclado en la mesa durante AR. */
@@ -25,10 +26,23 @@ const _searchQuat = new THREE.Quaternion();
 const _viewFromDepth = new THREE.Matrix4();
 const _eyeWorld = new THREE.Matrix4();
 const _occlPoint = new THREE.Vector3();
+const _pinPos = new THREE.Vector3();
+const _box = new THREE.Box3();
+const _boxSize = new THREE.Vector3();
+const _ndc = new THREE.Vector2();
+const _raycaster = new THREE.Raycaster();
+const _rayOrigin = new THREE.Vector3();
+const _rayDir = new THREE.Vector3();
+const _rayMatrix = new THREE.Matrix4();
 
 let generation = 0;
 let active = null;
 let arSupport = null;
+/** Platos anclados al mundo real. Sobreviven al volver a la carta mientras la sesión AR sigue abierta. */
+const world = {
+  menu: null,
+  pinned: [],
+};
 
 function queryAR() {
   if (arSupport) return arSupport;
@@ -211,6 +225,9 @@ function render() {
     : "MESA — Carta aumentada";
 
   const found = menu && plato ? findDish(menu, plato) : null;
+  const keep = Boolean(active?.session && world.pinned.length && menu && world.menu === menu);
+  if (keep && renderKeptAR(menu, plato, pedido, found)) return;
+
   const sameDish = found && active && active.menu === menu && active.dishId === found.dish.id && app.querySelector(".viewer");
   if (sameDish) return;
 
@@ -398,6 +415,7 @@ function viewerMarkup(menu, section, dish) {
     <section class="viewer" data-accent="${menu}">
       <canvas class="viewer-canvas" data-model="${esc(dish.id)}" aria-label="${esc(dish.name)}"></canvas>
       <div class="viewer-overlay">
+      <div class="xr-hud">
       <a class="viewer-back" data-nav href="${esc(appHref(menu))}">
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
         ${esc(copy.back)}
@@ -409,6 +427,7 @@ function viewerMarkup(menu, section, dish) {
       <p class="viewer-hint">${esc(copy.scanReady)}</p>
       <p class="viewer-alert" hidden></p>
       <button class="viewer-scan" type="button" data-action="start-ar" hidden>${esc(copy.scan)}</button>
+      <button class="viewer-pin" type="button" data-action="pin-dish" hidden>${esc(copy.pin)}</button>
       <div class="viewer-card">
         <div class="viewer-heading">
           <h1>${esc(dish.name)}</h1>
@@ -432,6 +451,8 @@ function viewerMarkup(menu, section, dish) {
           </button>
         </div>
       </div>
+      </div>
+      <div class="xr-menu" hidden></div>
       </div>
     </section>
   `;
@@ -466,6 +487,37 @@ function cancelSource(source) {
   }
 }
 
+function releaseWorld(view) {
+  for (const pin of world.pinned) {
+    if (pin.slot) pin.slot.cancelled = true;
+    pin.slot?.anchor?.delete?.();
+    if (pin.slot) pin.slot.anchor = null;
+    view?.scene?.remove(pin.group);
+  }
+  world.pinned = [];
+  world.menu = null;
+}
+
+function disposeView(view) {
+  view.renderer?.setAnimationLoop(null);
+  cancelAnimationFrame(view.frame);
+  cancelSource(view.hitTestSource);
+  view.hitTestSource = null;
+  view.overlay?.removeEventListener("pointerdown", view.onPlacePointer);
+  if (view.overlay) view.overlay.style.pointerEvents = "";
+  view.occluder?.geometry.dispose();
+  view.occluder?.material.dispose();
+  view.depthQuad?.geometry.dispose();
+  view.depthQuad?.material.dispose();
+  view.selectRing?.geometry.dispose();
+  view.selectRing?.material.dispose();
+  view.observer?.disconnect();
+  view.factsObserver?.disconnect();
+  window.removeEventListener("pointerup", view.onUp);
+  window.clearTimeout(view.alertTimer);
+  view.renderer?.dispose();
+}
+
 function stopViewer() {
   generation += 1;
   const current = active;
@@ -475,9 +527,13 @@ function stopViewer() {
   cancelAnimationFrame(current.frame);
   cancelSource(current.hitTestSource);
   current.hitTestSource = null;
+  releaseWorld(current);
+  if (current.anchorSlot) current.anchorSlot.cancelled = true;
   current.anchor?.delete?.();
   current.anchor = null;
+  current.anchorSlot = null;
   current.overlay?.removeEventListener("pointerdown", current.onPlacePointer);
+  if (current.overlay) current.overlay.style.pointerEvents = "";
   current.occluder?.geometry.dispose();
   current.occluder?.material.dispose();
   const session = current.session;
@@ -516,6 +572,7 @@ function mountViewer(menu, dish) {
   const view = setupThree(canvas, dish.id, token);
   view.menu = menu;
   view.dishId = dish.id;
+  view.liveToken = 0;
   active = view;
   bindFactsScroller();
   view.start();
@@ -660,10 +717,11 @@ function createDepthQuad() {
 }
 
 function isHudEvent(event) {
-  return Boolean(event.target.closest("button, a, input, select, label, .viewer-card"));
+  return Boolean(event.target.closest("button, a, input, select, label, .viewer-card, .xr-menu"));
 }
 
 function setDishScale(view, scale) {
+  if (!view.model || !view.shadow) return;
   view.model.scale.setScalar(scale);
   const shadowScale = scale / DISH_SCALE_SHADOW_REF;
   view.shadow.scale.set(shadowScale, shadowScale, shadowScale);
@@ -694,6 +752,7 @@ function applyViewerLighting(view, studio) {
 }
 
 function showStudio(view) {
+  if (!view.placed || !view.model) return;
   view.studio = true;
   view.surfaceSeen = false;
   view.surfaceValid = false;
@@ -701,8 +760,18 @@ function showStudio(view) {
   view.placing = false;
   view.placeRequested = false;
   view.blockedSurface = false;
+  view.blockedOverlap = false;
+  view.overlapSeen = false;
+  view.liveReady = false;
+  view.liveDishId = null;
+  view.suspendPlace = false;
   view.anchor?.delete?.();
   view.anchor = null;
+  view.anchorSlot = null;
+  view.selectRing?.removeFromParent();
+  if (view.overlay) view.overlay.style.pointerEvents = "";
+  const pinBtn = app.querySelector(".viewer-pin");
+  if (pinBtn) pinBtn.hidden = true;
   view.placed.matrixAutoUpdate = true;
   view.placed.position.set(0, 0, 0);
   view.placed.rotation.set(0, 0, 0);
@@ -763,8 +832,370 @@ function placeReticle(view, matrix, valid) {
   view.surfaceValid = valid;
 }
 
+function worldFootprint(group) {
+  if (!group) return 0.14;
+  const ring = group.children.find((child) => child.name === "selectRing");
+  if (ring) group.remove(ring);
+  _box.setFromObject(group);
+  if (ring) group.add(ring);
+  if (_box.isEmpty()) return 0.14;
+  _box.getSize(_boxSize);
+  return Math.max(_boxSize.x, _boxSize.z, 0.08) / 2;
+}
+
+function footprintAtARScale(view) {
+  if (!view.model) return 0.14;
+  const scale = view.model.scale.x || 1;
+  _box.setFromObject(view.model);
+  if (_box.isEmpty()) return 0.14;
+  _box.getSize(_boxSize);
+  const factor = DISH_SCALE_AR / scale;
+  return Math.max(_boxSize.x, _boxSize.z, 0.08) * factor / 2;
+}
+
+function liveRadiusOf(view) {
+  return view.liveRadius > 0 ? view.liveRadius : 0.14;
+}
+
+function overlapsPins(point, radius) {
+  for (const pin of world.pinned) {
+    pin.group.getWorldPosition(_pinPos);
+    const dx = _pinPos.x - point.x;
+    const dz = _pinPos.z - point.z;
+    const limit = pin.radius + radius + 0.012;
+    if (dx * dx + dz * dz < limit * limit) return true;
+  }
+  return false;
+}
+
+function placementHint(view, copy) {
+  return world.pinned.length > 0 ? copy.readyToPinMore : copy.readyToPin;
+}
+
+function factsHtml(menu, section, dish) {
+  const copy = UI[menu];
+  const nutrients = copy.nutrients.map((item) => `
+    <div>
+      <dt>${esc(item.label)}</dt>
+      <dd>${esc(dish.nutrition[item.key])} ${esc(item.unit)}</dd>
+    </div>
+  `).join("");
+  return `
+    <p class="portion">${esc(dish.portion)} · ${esc(section.title)}</p>
+    <dl class="nutrition">${nutrients}</dl>
+    <p class="viewer-allergens">${esc(copy.allergensTitle)}: ${dish.allergens.length ? esc(dish.allergens.join(", ")) : esc(copy.noAllergens)}</p>
+  `;
+}
+
+function fillViewerCard(menu, section, dish) {
+  const card = app.querySelector(".viewer-card");
+  if (!card) return;
+  const copy = UI[menu];
+  const title = card.querySelector("h1");
+  const priceEl = card.querySelector(".price-lg");
+  const track = card.querySelector(".viewer-facts-track");
+  const scroller = card.querySelector("[data-facts-scroller]");
+  const canvas = app.querySelector(".viewer-canvas");
+  if (title) title.textContent = dish.name;
+  if (priceEl) priceEl.textContent = price(menu, dish.price);
+  if (track) track.innerHTML = factsHtml(menu, section, dish);
+  if (scroller) scroller.scrollLeft = 0;
+  if (canvas) canvas.setAttribute("aria-label", dish.name);
+  const add = card.querySelector("[data-action='add-dish']");
+  if (add) {
+    add.dataset.menu = menu;
+    add.dataset.dish = dish.id;
+    paintAddButton(add, cartQty(menu, dish.id));
+  }
+  active?.syncFacts?.();
+}
+
+function ensureSelectRing(view) {
+  if (view.selectRing) return view.selectRing;
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.12, 0.15, 48),
+    new THREE.MeshBasicMaterial({ color: 0xf0c27a, side: THREE.DoubleSide, depthWrite: false })
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.012;
+  ring.name = "selectRing";
+  ring.renderOrder = 2;
+  view.selectRing = ring;
+  return ring;
+}
+
+function selectGroup(view, group, hint) {
+  if (!group) return;
+  const pin = group.userData.pin;
+  const menu = pin?.menu || group.userData.menu || view.menu;
+  const dishId = pin?.dishId || group.userData.dishId || view.dishId;
+  const found = findDish(menu, dishId);
+  if (!found) return;
+  view.selectedGroup = group;
+  fillViewerCard(menu, found.section, found.dish);
+  const several = placedGroups(view).length > 1;
+  if (several) {
+    const ring = ensureSelectRing(view);
+    ring.removeFromParent();
+    const radius = pin?.radius || view.liveRadius || 0.14;
+    ring.scale.setScalar((Math.max(radius, 0.05) * 1.12) / 0.15);
+    group.add(ring);
+  } else {
+    view.selectRing?.removeFromParent();
+  }
+  if (hint) setViewerHint(hint);
+  else if (several) setViewerHint(UI[menu].selectHint);
+}
+
+function placedGroups(view) {
+  const groups = [];
+  for (const pin of world.pinned) {
+    if (pin.group.visible) groups.push(pin.group);
+  }
+  if (view.dishPlaced && view.placed?.visible) groups.push(view.placed);
+  return groups;
+}
+
+function groupOf(object, groups) {
+  let node = object;
+  while (node) {
+    if (groups.includes(node)) return node;
+    node = node.parent;
+  }
+  return null;
+}
+
+function xrCamera(view) {
+  const cam = view.renderer.xr.getCamera();
+  return cam.cameras?.[0] || cam;
+}
+
+function selectFromHits(view, hits, groups) {
+  if (!hits.length) return false;
+  const group = groupOf(hits[0].object, groups);
+  if (!group) return false;
+  selectGroup(view, group);
+  return true;
+}
+
+function selectDishAtPointer(view, event) {
+  if (!view.session || view.suspendPlace) return false;
+  const groups = placedGroups(view);
+  if (!groups.length) return false;
+  const width = window.innerWidth || 1;
+  const height = window.innerHeight || 1;
+  _ndc.set((event.clientX / width) * 2 - 1, -(event.clientY / height) * 2 + 1);
+  const cam = xrCamera(view);
+  _raycaster.setFromCamera(_ndc, cam);
+  if (selectFromHits(view, _raycaster.intersectObjects(groups, true), groups)) return true;
+  let best = null;
+  let bestDist = 0.16;
+  for (const group of groups) {
+    group.getWorldPosition(_pinPos);
+    _pinPos.project(cam);
+    if (_pinPos.z < -1 || _pinPos.z > 1) continue;
+    const dist = Math.hypot(_pinPos.x - _ndc.x, _pinPos.y - _ndc.y);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = group;
+    }
+  }
+  if (!best) return false;
+  selectGroup(view, best);
+  return true;
+}
+
+function selectAlongXR(view, event) {
+  if (!view.session || view.suspendPlace) return false;
+  const space = event.inputSource?.targetRaySpace;
+  const frame = event.frame;
+  const referenceSpace = view.renderer.xr.getReferenceSpace();
+  if (!space || !frame || !referenceSpace) return false;
+  const pose = frame.getPose(space, referenceSpace);
+  if (!pose) return false;
+  _rayMatrix.fromArray(pose.transform.matrix);
+  _rayOrigin.setFromMatrixPosition(_rayMatrix);
+  _rayDir.set(0, 0, -1).transformDirection(_rayMatrix);
+  _raycaster.set(_rayOrigin, _rayDir);
+  _raycaster.far = 20;
+  const groups = placedGroups(view);
+  if (!groups.length) return false;
+  return selectFromHits(view, _raycaster.intersectObjects(groups, true), groups);
+}
+
+function pinLiveDish(view) {
+  if (!view?.session) return;
+  const copy = UI[view.menu];
+  if (!view.dishPlaced || !view.placed || !view.model) {
+    showViewerAlert(copy.pinNeedPlace);
+    return;
+  }
+  const group = view.placed;
+  const slot = view.anchorSlot || { anchor: view.anchor, cancelled: false };
+  const pin = {
+    menu: view.menu,
+    dishId: view.dishId,
+    group,
+    slot,
+    radius: Math.max(worldFootprint(group), 0.05),
+  };
+  group.userData.pin = pin;
+  group.userData.menu = view.menu;
+  group.userData.dishId = view.dishId;
+  world.pinned.push(pin);
+  world.menu = view.menu;
+  view.anchorSlot = null;
+  view.anchor = null;
+  view.dishPlaced = false;
+  view.placing = false;
+  view.placeRequested = false;
+  view.liveReady = false;
+  view.liveDishId = null;
+  view.liveToken = (view.liveToken || 0) + 1;
+  view.placed = null;
+  view.model = null;
+  view.shadow = null;
+  view.reticle.visible = false;
+  const pinBtn = app.querySelector(".viewer-pin");
+  if (pinBtn) pinBtn.hidden = true;
+  showToast(copy.pinnedToast);
+  setViewerHint(copy.pinnedHint);
+}
+
+function retireUnpinnedLive(view) {
+  if (!view) return;
+  view.liveToken = (view.liveToken || 0) + 1;
+  view.liveReady = false;
+  view.liveDishId = null;
+  view.dishPlaced = false;
+  view.placing = false;
+  view.placeRequested = false;
+  const group = view.placed;
+  if (view.anchorSlot) view.anchorSlot.cancelled = true;
+  view.anchor?.delete?.();
+  view.anchor = null;
+  view.anchorSlot = null;
+  if (group?.userData.pin) {
+    view.placed = null;
+    view.model = null;
+    view.shadow = null;
+    return;
+  }
+  if (group) view.scene.remove(group);
+  view.placed = null;
+  view.model = null;
+  view.shadow = null;
+}
+
+function mountLiveDish(view, menu, dishId) {
+  retireUnpinnedLive(view);
+  const token = (view.liveToken || 0) + 1;
+  view.liveToken = token;
+  const model = createDishModel(dishId);
+  const shadow = new THREE.Mesh(
+    new THREE.CircleGeometry(0.48, 40),
+    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false })
+  );
+  shadow.rotation.x = -Math.PI / 2;
+  shadow.position.y = 0.01;
+  shadow.name = "shadow";
+  const placed = new THREE.Group();
+  placed.add(model);
+  placed.add(shadow);
+  placed.userData.menu = menu;
+  placed.userData.dishId = dishId;
+  placed.visible = false;
+  view.scene.add(placed);
+  view.placed = placed;
+  view.model = model;
+  view.shadow = shadow;
+  view.menu = menu;
+  view.dishId = dishId;
+  view.liveDishId = dishId;
+  view.anchor = null;
+  view.anchorSlot = null;
+  view.dishPlaced = false;
+  view.placing = false;
+  view.placeRequested = false;
+  view.liveReady = true;
+  view.suspendPlace = false;
+  view.surfaceSeen = false;
+  view.surfaceValid = false;
+  view.blockedSurface = false;
+  view.blockedOverlap = false;
+  view.overlapSeen = false;
+  setDishScale(view, DISH_SCALE_AR);
+  view.liveRadius = worldFootprint(placed);
+  loadDishModel(dishId).then((loaded) => {
+    if (view.liveToken !== token || view.placed !== placed || loaded.userData.source !== "glb") return;
+    const spin = model.rotation.y;
+    placed.remove(model);
+    loaded.rotation.y = spin;
+    placed.add(loaded);
+    view.model = loaded;
+    setDishScale(view, DISH_SCALE_AR);
+    view.liveRadius = worldFootprint(placed);
+  });
+}
+
+function showDishInSession(menu, section, dish) {
+  const view = active;
+  const copy = UI[menu];
+  view.menu = menu;
+  const pinBtn = app.querySelector(".viewer-pin");
+  const scan = app.querySelector(".viewer-scan");
+  if (scan) scan.hidden = true;
+  if (view.liveDishId === dish.id && view.model && view.placed && !view.placed.userData.pin) {
+    view.suspendPlace = false;
+    view.liveReady = true;
+    if (pinBtn) pinBtn.hidden = false;
+    fillViewerCard(menu, section, dish);
+    if (!view.dishPlaced) setViewerHint(copy.scanHint);
+    return;
+  }
+  view.selectRing?.removeFromParent();
+  view.selectedGroup = null;
+  mountLiveDish(view, menu, dish.id);
+  fillViewerCard(menu, section, dish);
+  if (pinBtn) pinBtn.hidden = false;
+  setViewerHint(copy.scanHint);
+}
+
+function renderKeptAR(menu, plato, pedido, found) {
+  const hud = app.querySelector(".xr-hud");
+  const menuSlot = app.querySelector(".xr-menu");
+  if (!hud || !menuSlot || !active?.session) return false;
+
+  if (pedido) {
+    active.suspendPlace = true;
+    hud.hidden = true;
+    menuSlot.hidden = false;
+    menuSlot.innerHTML = pedidoView(menu);
+    menuSlot.scrollTop = 0;
+    return true;
+  }
+
+  if (found) {
+    menuSlot.hidden = true;
+    menuSlot.innerHTML = "";
+    hud.hidden = false;
+    active.suspendPlace = false;
+    showDishInSession(menu, found.section, found.dish);
+    return true;
+  }
+
+  retireUnpinnedLive(active);
+  active.suspendPlace = true;
+  active.reticle.visible = false;
+  hud.hidden = true;
+  menuSlot.hidden = false;
+  menuSlot.innerHTML = carta(menu);
+  menuSlot.scrollTop = 0;
+  return true;
+}
+
 function lockDish(view, copy, hit, referenceSpace) {
-  if (view.dishPlaced || view.placing) return;
+  if (!view.model || !view.placed || view.dishPlaced || view.placing) return;
   const pose = hit.getPose(referenceSpace);
   if (!pose || !isHorizontalSurface(pose.transform.matrix)) return;
   const snapshot = new Float32Array(pose.transform.matrix);
@@ -775,19 +1206,26 @@ function lockDish(view, copy, hit, referenceSpace) {
   applyLockedMatrix(view, snapshot);
   setDishScale(view, DISH_SCALE_AR);
   view.placed.visible = true;
-  setViewerHint(copy.placedHint);
+  view.placed.userData.menu = view.menu;
+  view.placed.userData.dishId = view.dishId;
+  view.liveRadius = worldFootprint(view.placed);
+  const slot = { anchor: null, cancelled: false };
+  view.anchorSlot = slot;
+  view.anchor = null;
+  selectGroup(view, view.placed, placementHint(view, copy));
   const done = () => {
     view.placing = false;
   };
   if (typeof hit.createAnchor === "function") {
     try {
       hit.createAnchor().then((anchor) => {
-        if (active !== view || !view.session || !view.dishPlaced) {
+        if (slot.cancelled || active !== view || !view.session) {
           anchor.delete?.();
           done();
           return;
         }
-        view.anchor = anchor;
+        slot.anchor = anchor;
+        if (view.anchorSlot === slot) view.anchor = anchor;
         done();
       }).catch(() => done());
     } catch {
@@ -798,27 +1236,32 @@ function lockDish(view, copy, hit, referenceSpace) {
   done();
 }
 
-function stickDish(view, frame) {
-  if (!view.dishPlaced || !view.anchor || !frame) return;
-  const referenceSpace = view.renderer.xr.getReferenceSpace();
-  if (!referenceSpace) return;
-  const pose = frame.getPose(view.anchor.anchorSpace, referenceSpace);
+function stickGroup(group, anchor, frame, referenceSpace) {
+  if (!group || !anchor || !frame || !referenceSpace) return;
+  const pose = frame.getPose(anchor.anchorSpace, referenceSpace);
   if (!pose) return;
   _eyeWorld.fromArray(pose.transform.matrix);
   _eyeWorld.decompose(_hitPos, _hitQuat, _hitScale);
   _hitEuler.setFromQuaternion(_hitQuat, "YXZ");
-  if (view.placed.position.distanceToSquared(_hitPos) > 0.0004) view.placed.position.copy(_hitPos);
+  if (group.position.distanceToSquared(_hitPos) > 0.0004) group.position.copy(_hitPos);
   const yawDelta = Math.atan2(
-    Math.sin(_hitEuler.y - view.placed.rotation.y),
-    Math.cos(_hitEuler.y - view.placed.rotation.y)
+    Math.sin(_hitEuler.y - group.rotation.y),
+    Math.cos(_hitEuler.y - group.rotation.y)
   );
-  if (Math.abs(yawDelta) > 0.05) view.placed.rotation.y = _hitEuler.y;
-  view.placed.scale.set(1, 1, 1);
-  view.placed.updateMatrix();
+  if (Math.abs(yawDelta) > 0.05) group.rotation.y = _hitEuler.y;
+  group.scale.set(1, 1, 1);
+  group.updateMatrix();
+}
+
+function stickDish(view, frame) {
+  const referenceSpace = view.renderer.xr.getReferenceSpace();
+  if (!referenceSpace) return;
+  for (const pin of world.pinned) stickGroup(pin.group, pin.slot?.anchor, frame, referenceSpace);
+  if (view.dishPlaced && view.placed && view.anchor) stickGroup(view.placed, view.anchor, frame, referenceSpace);
 }
 
 function tryPlaceDish(view) {
-  if (!view.session || view.dishPlaced || view.placing) return;
+  if (!view.session || !view.liveReady || view.suspendPlace || !view.model || view.dishPlaced || view.placing) return;
   view.placeRequested = true;
 }
 
@@ -826,13 +1269,27 @@ function finishSession(view) {
   cancelSource(view.hitTestSource);
   view.hitTestSource = null;
   view.hitTestSourceRequested = false;
+  view.overlay?.removeEventListener("pointerdown", view.onPlacePointer);
+  if (view.overlay) view.overlay.style.pointerEvents = "";
+  releaseWorld(view);
+  if (view.anchorSlot) view.anchorSlot.cancelled = true;
   view.anchor?.delete?.();
   view.anchor = null;
-  view.overlay?.removeEventListener("pointerdown", view.onPlacePointer);
+  view.anchorSlot = null;
   view.session = null;
   view.starting = false;
+  view.liveReady = false;
   view.renderer.setAnimationLoop(null);
   if (active !== view) return;
+  const pinBtn = app.querySelector(".viewer-pin");
+  if (pinBtn) pinBtn.hidden = true;
+  if (!view.model || !view.placed) {
+    active = null;
+    generation += 1;
+    disposeView(view);
+    render();
+    return;
+  }
   showStudio(view);
   const scan = app.querySelector(".viewer-scan");
   if (scan) scan.hidden = false;
@@ -841,6 +1298,12 @@ function finishSession(view) {
 }
 
 function updateHitTest(view, copy, frame) {
+  if (!view.liveReady || view.suspendPlace) {
+    view.reticle.visible = false;
+    view.surfaceValid = false;
+    view.blockedOverlap = false;
+    return null;
+  }
   if (view.dishPlaced) {
     view.reticle.visible = false;
     view.surfaceValid = false;
@@ -866,9 +1329,23 @@ function updateHitTest(view, copy, frame) {
     return null;
   }
 
-  const valid = isHorizontalSurface(pose.transform.matrix);
-  view.blockedSurface = !valid;
-  placeReticle(view, pose.transform.matrix, valid);
+  const horizontal = isHorizontalSurface(pose.transform.matrix);
+  placeReticle(view, pose.transform.matrix, horizontal);
+  const overlap = horizontal && overlapsPins(view.reticle.position, liveRadiusOf(view));
+  const valid = horizontal && !overlap;
+  view.blockedSurface = !horizontal;
+  view.blockedOverlap = overlap;
+  view.surfaceValid = valid;
+  view.reticle.material.color.setHex(overlap ? RETICLE_BLOCK : valid ? RETICLE_READY : RETICLE_SCAN);
+  if (overlap) {
+    if (!view.overlapSeen) {
+      view.overlapSeen = true;
+      view.surfaceSeen = false;
+      setViewerHint(copy.overlapHint);
+    }
+    return null;
+  }
+  if (view.overlapSeen) view.overlapSeen = false;
   if (valid && !view.surfaceSeen) {
     view.surfaceSeen = true;
     setViewerHint(copy.placeHint);
@@ -1026,9 +1503,11 @@ function drawXR(view, copy, frame) {
     const hit = updateHitTest(view, copy, frame);
     if (view.placeRequested && !view.dishPlaced && !view.placing) {
       view.placeRequested = false;
-      const referenceSpace = view.renderer.xr.getReferenceSpace();
-      if (hit && referenceSpace) lockDish(view, copy, hit, referenceSpace);
-      else showViewerAlert(view.blockedSurface ? copy.wallHint : copy.missHint);
+      if (view.liveReady && !view.suspendPlace) {
+        const referenceSpace = view.renderer.xr.getReferenceSpace();
+        if (hit && referenceSpace) lockDish(view, copy, hit, referenceSpace);
+        else showViewerAlert(view.blockedOverlap ? copy.overlapAlert : view.blockedSurface ? copy.wallHint : copy.missHint);
+      }
     }
     stickDish(view, frame);
     try {
@@ -1096,8 +1575,14 @@ function beginScan() {
     view.surfaceSeen = false;
     view.surfaceValid = false;
     view.blockedSurface = false;
+    view.blockedOverlap = false;
+    view.overlapSeen = false;
     view.placeRequested = false;
     view.placing = false;
+    view.liveReady = true;
+    view.liveDishId = view.dishId;
+    view.suspendPlace = false;
+    view.liveRadius = footprintAtARScale(view);
     view.lastPointerAt = 0;
     view.renderer.xr.enabled = true;
     view.renderer.xr.setReferenceSpaceType("local");
@@ -1118,20 +1603,28 @@ function beginScan() {
         return;
       }
       view.lastPointerAt = performance.now();
+      if (selectDishAtPointer(view, event)) {
+        view.suppressPlace = true;
+        return;
+      }
       tryPlaceDish(view);
     };
     view.overlay = overlay;
+    if (overlay) overlay.style.pointerEvents = "auto";
     overlay?.addEventListener("pointerdown", view.onPlacePointer);
-    session.addEventListener("select", () => {
+    session.addEventListener("select", (event) => {
       if (view.suppressPlace || performance.now() - view.lastPointerAt < 400) {
         view.suppressPlace = false;
         return;
       }
+      if (selectAlongXR(view, event)) return;
       tryPlaceDish(view);
     });
 
     const scan = app.querySelector(".viewer-scan");
     if (scan) scan.hidden = true;
+    const pinBtn = app.querySelector(".viewer-pin");
+    if (pinBtn) pinBtn.hidden = false;
     setViewerHint(copy.scanHint);
     view.renderer.setAnimationLoop((time, frame) => drawXR(view, copy, frame));
   }).catch((error) => {
@@ -1328,6 +1821,7 @@ function bindFactsScroller() {
   scroller.addEventListener("scrollend", sync);
   active.factsObserver = new ResizeObserver(sync);
   active.factsObserver.observe(scroller);
+  active.syncFacts = sync;
   sync();
 }
 
@@ -1370,6 +1864,10 @@ function onClick(event) {
   const action = event.target.closest("[data-action]");
   if (action?.dataset.action === "copy-slug") copySlug(action);
   if (action?.dataset.action === "start-ar") beginScan();
+  if (action?.dataset.action === "pin-dish") {
+    pinLiveDish(active);
+    return;
+  }
   if (action?.dataset.action === "add-dish") {
     const { menu, dish } = action.dataset;
     const qty = addToCart(menu, dish);
@@ -1395,8 +1893,21 @@ function onClick(event) {
     return;
   }
   if (action?.dataset.action === "place-order") {
-    clearCartForMenu(action.dataset.menu);
-    app.innerHTML = pedidoPlacedView(action.dataset.menu);
+    const menu = action.dataset.menu;
+    clearCartForMenu(menu);
+    if (active?.session && world.pinned.length && world.menu === menu) {
+      const hud = app.querySelector(".xr-hud");
+      const menuSlot = app.querySelector(".xr-menu");
+      if (hud && menuSlot) {
+        active.suspendPlace = true;
+        hud.hidden = true;
+        menuSlot.hidden = false;
+        menuSlot.innerHTML = pedidoPlacedView(menu);
+        menuSlot.scrollTop = 0;
+        return;
+      }
+    }
+    app.innerHTML = pedidoPlacedView(menu);
     window.scrollTo(0, 0);
     return;
   }
