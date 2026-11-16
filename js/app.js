@@ -1,11 +1,18 @@
-import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js";
+import * as THREE from "three";
 import { MENUS, UI, findDish, dishCount } from "./menus.js";
-import { createDishModel } from "./models.js";
+import { createDishModel, loadDishModel } from "./models.js";
 
 const app = document.querySelector("#app");
 
 const RETICLE_SCAN = 0xffcc33;
 const RETICLE_READY = 0x3ddc6a;
+/** Vista previa (antes de escanear). */
+const DISH_SCALE_PREVIEW = 1;
+/** Tamaño anclado en la mesa durante AR. */
+const DISH_SCALE_AR = 0.12;
+const DISH_SCALE_SHADOW_REF = DISH_SCALE_PREVIEW;
+const VIEWER_LIGHT_STUDIO = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
+const VIEWER_LIGHT_AR = { hemi: 2.2, key: 2.6, fill: 0.7, rim: 0, ambient: 0, exposure: 1 };
 const OCCLUSION_COLS = 32;
 const OCCLUSION_ROWS = 24;
 
@@ -658,8 +665,32 @@ function isHudEvent(event) {
 
 function setDishScale(view, scale) {
   view.model.scale.setScalar(scale);
-  const shadowScale = scale / 0.36;
+  const shadowScale = scale / DISH_SCALE_SHADOW_REF;
   view.shadow.scale.set(shadowScale, shadowScale, shadowScale);
+}
+
+function applyViewerLighting(view, studio) {
+  const preset = studio ? VIEWER_LIGHT_STUDIO : VIEWER_LIGHT_AR;
+  const { hemi, key, fill, rim, ambient, bounce } = view.lights;
+  if (!hemi) return;
+  hemi.intensity = preset.hemi;
+  hemi.color.setHex(studio ? 0xffffff : 0xfff6ea);
+  hemi.groundColor.setHex(studio ? 0xb8aea4 : 0x2a211c);
+  key.intensity = preset.key;
+  fill.intensity = preset.fill;
+  if (rim) {
+    rim.intensity = preset.rim;
+    rim.visible = preset.rim > 0;
+  }
+  if (ambient) {
+    ambient.intensity = preset.ambient;
+    ambient.visible = preset.ambient > 0;
+  }
+  if (bounce) {
+    bounce.intensity = studio ? 1.8 : 0;
+    bounce.visible = studio;
+  }
+  view.renderer.toneMappingExposure = preset.exposure;
 }
 
 function showStudio(view) {
@@ -677,7 +708,7 @@ function showStudio(view) {
   view.placed.rotation.set(0, 0, 0);
   view.placed.scale.set(1, 1, 1);
   view.placed.visible = true;
-  setDishScale(view, 0.36);
+  setDishScale(view, DISH_SCALE_PREVIEW);
   view.reticle.visible = false;
   view.reticle.material.color.setHex(RETICLE_SCAN);
   if (view.occluder) view.occluder.visible = false;
@@ -690,6 +721,7 @@ function showStudio(view) {
   }
   view.camera.position.set(0.15, 2.15, 6.4);
   view.camera.lookAt(0, 0.18, 0);
+  applyViewerLighting(view, true);
   view.resize();
 }
 
@@ -741,7 +773,7 @@ function lockDish(view, copy, hit, referenceSpace) {
   view.surfaceValid = false;
   view.reticle.visible = false;
   applyLockedMatrix(view, snapshot);
-  setDishScale(view, 0.12);
+  setDishScale(view, DISH_SCALE_AR);
   view.placed.visible = true;
   setViewerHint(copy.placedHint);
   const done = () => {
@@ -1057,6 +1089,7 @@ function beginScan() {
     session.addEventListener("end", () => finishSession(view));
     cancelAnimationFrame(view.frame);
     view.studio = false;
+    applyViewerLighting(view, false);
     view.dishPlaced = false;
     view.placed.visible = false;
     view.reticle.visible = false;
@@ -1116,22 +1149,32 @@ function setupThree(canvas, dishId, session) {
   renderer.setClearColor(0x000000, 0);
   if (THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.toneMappingExposure = VIEWER_LIGHT_STUDIO.exposure;
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 40);
   camera.position.set(0.15, 2.15, 6.4);
   camera.lookAt(0, 0.18, 0);
 
-  scene.add(new THREE.HemisphereLight(0xfff6ea, 0x2a211c, 2.2));
-  const key = new THREE.DirectionalLight(0xffffff, 2.6);
+  const hemi = new THREE.HemisphereLight(0xffffff, 0xb8aea4, VIEWER_LIGHT_STUDIO.hemi);
+  scene.add(hemi);
+  const ambient = new THREE.AmbientLight(0xffffff, VIEWER_LIGHT_STUDIO.ambient);
+  scene.add(ambient);
+  const key = new THREE.DirectionalLight(0xffffff, VIEWER_LIGHT_STUDIO.key);
   key.position.set(2.4, 4.2, 2.2);
   scene.add(key);
-  const fill = new THREE.DirectionalLight(0xffc9a0, 0.7);
+  const fill = new THREE.DirectionalLight(0xfff0e0, VIEWER_LIGHT_STUDIO.fill);
   fill.position.set(-2.8, 1.4, -1.6);
   scene.add(fill);
+  const bounce = new THREE.DirectionalLight(0xffe8d0, 1.8);
+  bounce.position.set(0.4, -0.6, 3.2);
+  scene.add(bounce);
+  const rim = new THREE.DirectionalLight(0xffffff, VIEWER_LIGHT_STUDIO.rim);
+  rim.position.set(0.8, 2.8, 4.6);
+  scene.add(rim);
 
   const model = createDishModel(dishId);
-  model.scale.setScalar(0.36);
+  model.scale.setScalar(DISH_SCALE_PREVIEW);
 
   const shadow = new THREE.Mesh(
     new THREE.CircleGeometry(0.48, 40),
@@ -1182,7 +1225,7 @@ function setupThree(canvas, dishId, session) {
   });
   canvas.addEventListener("pointermove", (event) => {
     if (!dragging || !view.studio) return;
-    model.rotation.y += (event.clientX - lastX) * 0.012;
+    view.model.rotation.y += (event.clientX - lastX) * 0.012;
     lastX = event.clientX;
   });
   function onUp() {
@@ -1205,6 +1248,7 @@ function setupThree(canvas, dishId, session) {
     onUp,
     resize,
     studio: true,
+    lights: { hemi, key, fill, rim, ambient, bounce },
     arReady: false,
     frame: 0,
     start() {
@@ -1212,6 +1256,16 @@ function setupThree(canvas, dishId, session) {
       view.frame = frame;
     },
   };
+
+  loadDishModel(dishId).then((loaded) => {
+    if (generation !== session || !view.studio || loaded.userData.source !== "glb") return;
+    const spin = view.model.rotation.y;
+    placed.remove(view.model);
+    loaded.rotation.y = spin;
+    placed.add(loaded);
+    view.model = loaded;
+    setDishScale(view, DISH_SCALE_PREVIEW);
+  });
 
   const depthTexture = depthQuad.userData.depthTexture;
   depthQuad.onBeforeRender = (activeRenderer) => {
@@ -1231,7 +1285,7 @@ function setupThree(canvas, dishId, session) {
 
   function tick() {
     if (generation !== session || !view.studio) return;
-    if (!dragging && !reduceMotion) model.rotation.y += 0.005;
+    if (!dragging && !reduceMotion) view.model.rotation.y += 0.005;
     renderer.render(scene, camera);
     frame = requestAnimationFrame(tick);
     view.frame = frame;

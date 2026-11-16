@@ -1,4 +1,18 @@
-import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js";
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+const MODELS_DIR = new URL("../models/", import.meta.url);
+const gltfLoader = new GLTFLoader();
+const glbCache = new Map();
+
+/** Nombre de archivo: id del plato con guiones → guiones bajos (ej. `inca-kola` → `inca_kola.glb`). */
+export function dishGlbFileName(dishId) {
+  return `${String(dishId).replace(/-/g, "_")}.glb`;
+}
+
+export function dishGlbUrl(dishId) {
+  return new URL(dishGlbFileName(dishId), MODELS_DIR).href;
+}
 
 const materials = new Map();
 
@@ -484,6 +498,7 @@ const builders = {
 
 export function createDishModel(dishId) {
   const root = new THREE.Group();
+  root.userData.source = "procedural";
   root.add(plate());
   const food = new THREE.Group();
   food.position.y = 0.08;
@@ -491,4 +506,56 @@ export function createDishModel(dishId) {
   build(food);
   root.add(food);
   return root;
+}
+
+function prepareGltfScene(object) {
+  object.traverse((node) => {
+    if (!node.isMesh) return;
+    const maps = [];
+    const mat = node.material;
+    if (Array.isArray(mat)) mat.forEach((m) => maps.push(m?.map));
+    else if (mat?.map) maps.push(mat.map);
+    maps.forEach((map) => {
+      if (map && THREE.SRGBColorSpace) map.colorSpace = THREE.SRGBColorSpace;
+    });
+  });
+}
+
+function fitGlbToScene(object) {
+  const bounds = new THREE.Box3().setFromObject(object);
+  if (bounds.isEmpty()) return;
+  const size = bounds.getSize(new THREE.Vector3());
+  const center = bounds.getCenter(new THREE.Vector3());
+  object.position.sub(center);
+  bounds.setFromObject(object);
+  object.position.y -= bounds.min.y;
+  const span = Math.max(size.x, size.y, size.z, 0.001);
+  const target = 1.15;
+  object.scale.multiplyScalar(target / span);
+}
+
+function buildGlbRoot(gltfScene) {
+  prepareGltfScene(gltfScene);
+  const root = new THREE.Group();
+  root.userData.source = "glb";
+  const content = gltfScene;
+  fitGlbToScene(content);
+  root.add(content);
+  return root;
+}
+
+/** Carga `models/<id_con_underscores>.glb` o devuelve el modelo procedural actual. */
+export async function loadDishModel(dishId) {
+  const url = dishGlbUrl(dishId);
+  if (glbCache.has(url)) {
+    return glbCache.get(url).clone(true);
+  }
+  try {
+    const gltf = await gltfLoader.loadAsync(url);
+    const root = buildGlbRoot(gltf.scene);
+    glbCache.set(url, root);
+    return root.clone(true);
+  } catch {
+    return createDishModel(dishId);
+  }
 }

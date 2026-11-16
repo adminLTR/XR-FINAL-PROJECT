@@ -1,4 +1,4 @@
-/** Cartas de MESA. `model` queda listo para el .glb que se colocará en AR. */
+/** Cartas de MESA. Modelos GLB opcionales en `/models/`: `<id>.glb` con guiones del `id` → `_` (ej. `inca-kola` → `inca_kola.glb`). */
 
 export const UI = {
   pe: {
