@@ -12,7 +12,7 @@ const DISH_SCALE_PREVIEW = 1;
 const DISH_SCALE_AR = 0.12;
 const DISH_SCALE_SHADOW_REF = DISH_SCALE_PREVIEW;
 const VIEWER_LIGHT_STUDIO = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
-const VIEWER_LIGHT_AR = { hemi: 2.2, key: 2.6, fill: 0.7, rim: 0, ambient: 0, exposure: 1 };
+const VIEWER_LIGHT_AR = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
 const OCCLUSION_COLS = 32;
 const OCCLUSION_ROWS = 24;
 
