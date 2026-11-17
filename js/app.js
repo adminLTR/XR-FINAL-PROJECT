@@ -14,8 +14,7 @@ const DISH_SCALE_AR = 0.12;
 const DISH_SCALE_SHADOW_REF = DISH_SCALE_PREVIEW;
 const VIEWER_LIGHT_STUDIO = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
 const VIEWER_LIGHT_AR = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
-const OCCLUSION_COLS = 48;
-const OCCLUSION_ROWS = 36;
+const OCCLUSION_BIAS_M = 0.012;
 
 const _hitPos = new THREE.Vector3();
 const _hitQuat = new THREE.Quaternion();
@@ -25,7 +24,6 @@ const _searchPos = new THREE.Vector3();
 const _searchQuat = new THREE.Quaternion();
 const _viewFromDepth = new THREE.Matrix4();
 const _eyeWorld = new THREE.Matrix4();
-const _occlPoint = new THREE.Vector3();
 const _pinPos = new THREE.Vector3();
 const _box = new THREE.Box3();
 const _boxSize = new THREE.Vector3();
@@ -610,6 +608,18 @@ function guardDepthBinding() {
   proto.__mesaDepthGuard = true;
 }
 
+function useLayerDepthBuffer() {
+  if (typeof XRProjectionLayer === "undefined") return;
+  const proto = XRProjectionLayer.prototype;
+  if (proto.__mesaUseDepth) return;
+  try {
+    Object.defineProperty(proto, "ignoreDepthValues", { configurable: true, get: () => false });
+    proto.__mesaUseDepth = true;
+  } catch {
+    /* El navegador no deja cambiar el flag; el quad igual escribe gl_FragDepth. */
+  }
+}
+
 function hideDepthFromRenderer(session) {
   const features = session.enabledFeatures;
   if (!features?.includes("depth-sensing")) return;
@@ -621,43 +631,6 @@ function hideDepthFromRenderer(session) {
   }
 }
 
-function createOccluder() {
-  const positions = new Float32Array(OCCLUSION_COLS * OCCLUSION_ROWS * 3);
-  const indices = new Uint16Array((OCCLUSION_COLS - 1) * (OCCLUSION_ROWS - 1) * 6);
-  let n = 0;
-  for (let y = 0; y < OCCLUSION_ROWS - 1; y += 1) {
-    for (let x = 0; x < OCCLUSION_COLS - 1; x += 1) {
-      const a = y * OCCLUSION_COLS + x;
-      indices[n] = a;
-      indices[n + 1] = a + OCCLUSION_COLS;
-      indices[n + 2] = a + 1;
-      indices[n + 3] = a + 1;
-      indices[n + 4] = a + OCCLUSION_COLS;
-      indices[n + 5] = a + OCCLUSION_COLS + 1;
-      n += 6;
-    }
-  }
-  const geometry = new THREE.BufferGeometry();
-  const positionAttr = new THREE.BufferAttribute(positions, 3);
-  positionAttr.setUsage(THREE.DynamicDrawUsage);
-  geometry.setAttribute("position", positionAttr);
-  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-  const mesh = new THREE.Mesh(
-    geometry,
-    new THREE.MeshBasicMaterial({
-      colorWrite: false,
-      depthWrite: true,
-      depthTest: true,
-      side: THREE.DoubleSide,
-    })
-  );
-  mesh.frustumCulled = false;
-  mesh.renderOrder = -1000;
-  mesh.visible = false;
-  mesh.name = "occluder";
-  return mesh;
-}
-
 function createDepthQuad() {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array([
@@ -665,35 +638,31 @@ function createDepthQuad() {
     3, -1, 0,
     -1, 3, 0,
   ]), 3));
-  const depthTexture = new THREE.DataArrayTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 1);
-  depthTexture.generateMipmaps = false;
-  depthTexture.flipY = false;
-  depthTexture.magFilter = THREE.NearestFilter;
-  depthTexture.minFilter = THREE.NearestFilter;
-  depthTexture.wrapS = THREE.ClampToEdgeWrapping;
-  depthTexture.wrapT = THREE.ClampToEdgeWrapping;
-  depthTexture.needsUpdate = false;
-  depthTexture.version = 0;
-  const depthTexture2D = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
+  const depthTexture2D = new THREE.DataTexture(
+    new Float32Array([0]),
+    1,
+    1,
+    THREE.RedFormat,
+    THREE.FloatType
+  );
   depthTexture2D.generateMipmaps = false;
   depthTexture2D.flipY = false;
   depthTexture2D.magFilter = THREE.NearestFilter;
   depthTexture2D.minFilter = THREE.NearestFilter;
   depthTexture2D.wrapS = THREE.ClampToEdgeWrapping;
   depthTexture2D.wrapT = THREE.ClampToEdgeWrapping;
-  depthTexture2D.needsUpdate = false;
-  depthTexture2D.version = 0;
+  if (THREE.NoColorSpace) depthTexture2D.colorSpace = THREE.NoColorSpace;
+  depthTexture2D.needsUpdate = true;
   const material = new THREE.ShaderMaterial({
     uniforms: {
-      uDepthArray: { value: depthTexture },
       uDepth2D: { value: depthTexture2D },
-      uIsArray: { value: 1 },
-      uLayer: { value: 0 },
+      uMetersInRed: { value: 1 },
       uRawToMeters: { value: 1 },
-      uPack: { value: 1 },
+      uPack: { value: 0 },
       uViewToDepth: { value: new THREE.Matrix4() },
       uViewport: { value: new THREE.Vector4(0, 0, 1, 1) },
       uProjZ: { value: new THREE.Vector4(0, 0, -1, 0) },
+      uBias: { value: OCCLUSION_BIAS_M },
     },
     glslVersion: THREE.GLSL3,
     vertexShader: `
@@ -704,30 +673,28 @@ function createDepthQuad() {
     `,
     fragmentShader: `
       precision highp float;
-      precision highp sampler2DArray;
-      uniform sampler2DArray uDepthArray;
       uniform sampler2D uDepth2D;
-      uniform int uIsArray;
-      uniform float uLayer;
+      uniform int uMetersInRed;
       uniform float uRawToMeters;
       uniform float uPack;
       uniform mat4 uViewToDepth;
       uniform vec4 uViewport;
       uniform vec4 uProjZ;
+      uniform float uBias;
       out vec4 fragColor;
       void main() {
         vec2 normView = vec2(
           (gl_FragCoord.x - uViewport.x) / max(uViewport.z, 1.0),
           1.0 - (gl_FragCoord.y - uViewport.y) / max(uViewport.w, 1.0)
         );
-        vec2 depthUv = clamp((uViewToDepth * vec4(normView, 0.0, 1.0)).xy, 0.0, 1.0);
-        vec4 packed = uIsArray == 1
-          ? texture(uDepthArray, vec3(depthUv, uLayer))
-          : texture(uDepth2D, depthUv);
-        float raw = uPack > 0.5 ? dot(packed.ra, vec2(1.0, 1.0 / 256.0)) : packed.r;
-        float meters = raw * uRawToMeters;
+        vec2 depthUv = (uViewToDepth * vec4(normView, 0.0, 1.0)).xy;
+        if (depthUv.x < 0.0 || depthUv.y < 0.0 || depthUv.x > 1.0 || depthUv.y > 1.0) discard;
+        vec4 packed = texture(uDepth2D, depthUv);
+        float meters = uMetersInRed == 1
+          ? packed.r
+          : (uPack > 0.5 ? dot(packed.ra, vec2(65280.0, 255.0)) : packed.r) * uRawToMeters;
         if (meters <= 0.02 || meters > 8.0) discard;
-        meters += 0.015;
+        meters += uBias;
         float viewZ = -meters;
         float clipZ = uProjZ.x * viewZ + uProjZ.y;
         float clipW = uProjZ.z * viewZ + uProjZ.w;
@@ -747,7 +714,6 @@ function createDepthQuad() {
   mesh.renderOrder = -1000;
   mesh.visible = false;
   mesh.name = "depthQuad";
-  mesh.userData.depthTexture = depthTexture;
   mesh.userData.depthTexture2D = depthTexture2D;
   return mesh;
 }
@@ -756,8 +722,20 @@ function isHudEvent(event) {
   return Boolean(event.target.closest("button, a, input, select, label, .viewer-card, .xr-menu"));
 }
 
+function keepDishDepth(root) {
+  root?.traverse((node) => {
+    const list = Array.isArray(node.material) ? node.material : node.material ? [node.material] : [];
+    for (const mat of list) {
+      if (!mat) continue;
+      mat.depthTest = true;
+      if (!mat.transparent && !mat.alphaTest) mat.depthWrite = true;
+    }
+  });
+}
+
 function setDishScale(view, scale) {
   if (!view.model || !view.shadow) return;
+  keepDishDepth(view.model);
   view.model.scale.setScalar(scale);
   const shadowScale = scale / DISH_SCALE_SHADOW_REF;
   view.shadow.scale.set(shadowScale, shadowScale, shadowScale);
@@ -1392,84 +1370,55 @@ function updateHitTest(view, copy, frame) {
   return valid ? hit : null;
 }
 
-function depthSamples(depthInfo) {
+function depthPixelCount(depthInfo) {
   const width = depthInfo.width | 0;
   const height = depthInfo.height | 0;
-  const count = width * height;
-  if (!count) return null;
+  if (width < 2 || height < 2) return 0;
+  return width * height;
+}
+
+function uploadCpuDepth(view, depthInfo) {
+  const texture = view.depthQuad?.userData.depthTexture2D;
+  const count = depthPixelCount(depthInfo);
+  const buffer = depthInfo.data;
+  if (!texture || !count || !buffer) return false;
   const scale = depthInfo.rawValueToMeters > 0 ? depthInfo.rawValueToMeters : 1;
-  const raw = depthInfo.data;
-  if (raw instanceof ArrayBuffer && raw.byteLength >= count * 4) {
-    return { values: new Float32Array(raw), scale, width, height };
+  const format = view.session?.depthDataFormat;
+  let source = null;
+  if (ArrayBuffer.isView(buffer) && buffer.length >= count) {
+    source = buffer;
+  } else if (format === "float32" && buffer.byteLength >= count * 4) {
+    source = new Float32Array(buffer, 0, count);
+  } else if (buffer.byteLength >= count * 2) {
+    source = new Uint16Array(buffer, 0, count);
   }
-  if (ArrayBuffer.isView(raw) && raw.BYTES_PER_ELEMENT === 4 && raw.length >= count) {
-    return { values: raw, scale, width, height };
+  if (!source) return false;
+  if (!view.depthPixels || view.depthPixels.length !== count) {
+    view.depthPixels = new Float32Array(count);
   }
-  return null;
-}
-
-function sampleDepth(depthInfo, packed, x, y) {
-  if (packed) return packed.values[y * packed.width + x] * packed.scale;
-  if (typeof depthInfo.getDepthInMeters !== "function") return 0;
-  return depthInfo.getDepthInMeters(x, y);
-}
-
-function occlusionMeters(depthInfo, packed, du, dv) {
-  if (typeof depthInfo.getDepthInMeters === "function") return depthInfo.getDepthInMeters(du, dv);
-  const width = depthInfo.width | 0;
-  const height = depthInfo.height | 0;
-  if (!width || !height) return 0;
-  const sx = Math.min(width - 1, Math.max(0, Math.round(du * (width - 1))));
-  const sy = Math.min(height - 1, Math.max(0, Math.round(dv * (height - 1))));
-  return sampleDepth(depthInfo, packed, sx, sy);
-}
-
-function updateCpuOcclusion(view, depthInfo, xrView) {
-  const mesh = view.occluder;
-  const positions = mesh.geometry.attributes.position.array;
-  _eyeWorld.fromArray(xrView.transform.matrix);
-  const proj = xrView.projectionMatrix;
-  const p00 = proj[0];
-  const p11 = proj[5];
-  const p02 = proj[8];
-  const p12 = proj[9];
-  if (!p00 || !p11) return;
-
-  const packed = depthSamples(depthInfo);
-  let ptr = 0;
+  const meters = view.depthPixels;
   let finite = 0;
-  for (let y = 0; y < OCCLUSION_ROWS; y += 1) {
-    const dv = (y + 0.5) / OCCLUSION_ROWS;
-    for (let x = 0; x < OCCLUSION_COLS; x += 1) {
-      const du = (x + 0.5) / OCCLUSION_COLS;
-      let meters = occlusionMeters(depthInfo, packed, du, dv);
-      const valid = Number.isFinite(meters) && meters > 0.02 && meters < 8;
-      if (!valid) meters = 8;
-      else meters += 0.015;
-
-      const ndcX = du * 2 - 1;
-      const ndcY = 1 - dv * 2;
-      const viewX = (meters * (ndcX + p02)) / p00;
-      const viewY = (meters * (ndcY + p12)) / p11;
-      if (!Number.isFinite(viewX) || !Number.isFinite(viewY)) {
-        _occlPoint.set(0, -2, 0);
-      } else {
-        _occlPoint.set(viewX, viewY, -meters).applyMatrix4(_eyeWorld);
-        if (valid) finite += 1;
-      }
-      positions[ptr] = _occlPoint.x;
-      positions[ptr + 1] = _occlPoint.y;
-      positions[ptr + 2] = _occlPoint.z;
-      ptr += 3;
+  for (let i = 0; i < count; i += 1) {
+    const value = source[i] * scale;
+    if (value > 0.02 && value < 8) {
+      meters[i] = value;
+      finite += 1;
+    } else {
+      meters[i] = 0;
     }
   }
-
-  mesh.geometry.attributes.position.needsUpdate = true;
-  mesh.position.set(0, 0, 0);
-  mesh.quaternion.identity();
-  mesh.scale.set(1, 1, 1);
-  mesh.updateMatrix();
-  mesh.visible = finite > 24;
+  if (finite < 32) return false;
+  const width = depthInfo.width | 0;
+  const height = depthInfo.height | 0;
+  texture.image = { data: meters, width, height };
+  texture.needsUpdate = true;
+  const mapping = depthInfo.normDepthBufferFromNormView?.matrix;
+  const uniform = view.depthQuad.material.uniforms.uViewToDepth.value;
+  if (mapping) uniform.fromArray(mapping);
+  else uniform.identity();
+  view.depthQuad.material.uniforms.uMetersInRed.value = 1;
+  view.depthQuad.userData.externalDepth = null;
+  return true;
 }
 
 function depthBinding(view) {
@@ -1501,38 +1450,42 @@ function gpuDepthInfo(view, xrView) {
 
 function prepareOcclusion(view, frame) {
   view.gpuDepth = null;
+  if (view.occluder) view.occluder.visible = false;
+  if (view.depthQuad) view.depthQuad.visible = false;
   const referenceSpace = view.renderer.xr.getReferenceSpace();
-  if (!referenceSpace) return;
+  if (!referenceSpace || !view.depthQuad) return;
   const pose = frame.getViewerPose(referenceSpace);
   const xrView = pose?.views?.[0];
   if (!xrView) return;
   view.occlusionProj = xrView.projectionMatrix;
 
-  const cpuPreferred = view.session.depthUsage !== "gpu-optimized";
-  if (cpuPreferred && typeof frame.getDepthInformation === "function") {
+  if (typeof frame.getDepthInformation === "function" && view.session?.depthUsage !== "gpu-optimized") {
     let depth = null;
     try {
       depth = frame.getDepthInformation(xrView);
     } catch {
       depth = null;
     }
-    if (depth && (typeof depth.getDepthInMeters === "function" || depth.data)) {
-      view.depthQuad.visible = false;
-      updateCpuOcclusion(view, depth, xrView);
+    if (depth && uploadCpuDepth(view, depth)) {
+      view.depthQuad.visible = true;
       return;
     }
   }
 
   const gpu = gpuDepthInfo(view, xrView);
-  if (gpu) {
+  if (gpu?.texture && gpu.textureType !== "texture-array") {
     view.gpuDepth = gpu;
+    view.depthQuad.userData.externalDepth = gpu;
+    view.depthQuad.material.uniforms.uMetersInRed.value = 0;
+    const mapping = gpu.normDepthBufferFromNormView?.matrix;
+    const uniform = view.depthQuad.material.uniforms.uViewToDepth.value;
+    if (mapping) uniform.fromArray(mapping);
+    else uniform.identity();
     view.depthQuad.visible = true;
-    view.occluder.visible = false;
     return;
   }
 
   view.depthQuad.visible = false;
-  if (view.occluder) view.occluder.visible = false;
 }
 
 function drawXR(view, copy, frame) {
@@ -1602,6 +1555,7 @@ function beginScan() {
     view.session = session;
     view.starting = false;
     guardDepthBinding();
+    useLayerDepthBuffer();
     hideDepthFromRenderer(session);
     session.addEventListener("end", () => finishSession(view));
     cancelAnimationFrame(view.frame);
@@ -1729,8 +1683,7 @@ function setupThree(canvas, dishId, session) {
   reticle.renderOrder = 2;
   scene.add(reticle);
 
-  const occluder = createOccluder();
-  scene.add(occluder);
+  const occluder = null;
   const depthQuad = createDepthQuad();
   scene.add(depthQuad);
 
@@ -1798,29 +1751,22 @@ function setupThree(canvas, dishId, session) {
     setDishScale(view, DISH_SCALE_PREVIEW);
   });
 
-  const depthTexture = depthQuad.userData.depthTexture;
   const depthTexture2D = depthQuad.userData.depthTexture2D;
   depthQuad.onBeforeRender = (activeRenderer) => {
-    const info = view.gpuDepth;
-    if (!info?.texture) return;
-    const isArray = info.textureType === "texture-array";
-    const target = isArray ? depthTexture : depthTexture2D;
-    const props = activeRenderer.properties.get(target);
-    props.__webglTexture = info.texture;
-    props.__version = target.version;
     const gl = activeRenderer.getContext();
     const vp = gl.getParameter(gl.VIEWPORT);
     const uniforms = depthQuad.material.uniforms;
-    uniforms.uIsArray.value = isArray ? 1 : 0;
-    uniforms.uLayer.value = Number.isFinite(info.imageIndex) ? info.imageIndex : 0;
-    uniforms.uRawToMeters.value = info.rawValueToMeters > 0 ? info.rawValueToMeters : 1;
-    uniforms.uPack.value = view.session?.depthDataFormat === "luminance-alpha" ? 1 : 0;
     uniforms.uViewport.value.set(vp[0], vp[1], Math.max(vp[2], 1), Math.max(vp[3], 1));
     const proj = view.occlusionProj;
     if (proj) uniforms.uProjZ.value.set(proj[10], proj[14], proj[11], proj[15]);
-    const mapping = info.normDepthBufferFromNormView?.matrix;
-    if (mapping) uniforms.uViewToDepth.value.fromArray(mapping);
-    else uniforms.uViewToDepth.value.identity();
+    const info = view.gpuDepth;
+    if (!info?.texture || info.textureType === "texture-array") return;
+    const props = activeRenderer.properties.get(depthTexture2D);
+    props.__webglTexture = info.texture;
+    props.__version = depthTexture2D.version;
+    uniforms.uMetersInRed.value = 0;
+    uniforms.uRawToMeters.value = info.rawValueToMeters > 0 ? info.rawValueToMeters : 1;
+    uniforms.uPack.value = view.session?.depthDataFormat === "luminance-alpha" || view.session?.depthDataFormat === "unsigned-short" ? 1 : 0;
   };
 
   function tick() {
