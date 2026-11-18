@@ -51,6 +51,12 @@ const world = {
   menu: null,
   pinned: [],
 };
+/** Cola de platos a colocar en AR, en orden de selección. */
+const placeQueue = [];
+let pickMode = false;
+let pickedIds = [];
+let holdTimer = 0;
+let holdFired = false;
 
 function queryAR() {
   if (arSupport) return arSupport;
@@ -297,8 +303,34 @@ function langSwitch(menu) {
   `;
 }
 
-function render() {
+function resetPicks() {
+  pickMode = false;
+  pickedIds = [];
+  placeQueue.length = 0;
+  window.clearTimeout(holdTimer);
+  holdFired = false;
+}
+
+function placeQueueLabel(copy) {
+  const n = pickedIds.length;
+  if (n > 1) return copy.placeQueueN.replace("{n}", String(n));
+  return copy.placeQueue;
+}
+
+function shellState() {
   const { menu, plato, pedido } = route();
+  const found = menu && plato ? findDish(menu, plato) : null;
+  return {
+    pedido,
+    found: found
+      ? { dish: textDish(menu, found.dish), section: textSection(menu, found.section) }
+      : null,
+    missing: Boolean(plato && !found),
+  };
+}
+
+function render() {
+  const { menu, pedido } = route();
   const copy = menu ? copyOf(menu) : null;
   document.documentElement.lang = copy ? copy.htmlLang : "es";
   document.title = copy
@@ -307,28 +339,32 @@ function render() {
       : `MESA — ${copy.carta}`
     : "MESA — Carta aumentada";
 
-  const found = menu && plato ? findDish(menu, plato) : null;
-  const shown = found
-    ? { dish: textDish(menu, found.dish), section: textSection(menu, found.section) }
-    : null;
-  const keep = Boolean(active?.session && world.pinned.length && menu && world.menu === menu);
-  if (keep && renderKeptAR(menu, plato, pedido, shown)) return;
+  if (!menu) {
+    resetPicks();
+    stopViewer();
+    app.innerHTML = landing();
+    window.scrollTo(0, 0);
+    return;
+  }
 
-  const uiLang = menu ? menuLang(menu) : null;
-  const sameDish = found && active && active.menu === menu && active.dishId === found.dish.id
-    && app.querySelector(".viewer") && active.uiLang === uiLang;
-  if (sameDish) return;
+  const state = shellState();
+  if (active && active.menu === menu && app.querySelector(".viewer")) {
+    active.uiLang = menuLang(menu);
+    paintShell(menu, state);
+    return;
+  }
 
+  resetPicks();
   stopViewer();
-
-  if (!menu) app.innerHTML = landing();
-  else if (pedido) app.innerHTML = pedidoView(menu);
-  else if (plato && !found) app.innerHTML = missing(menu);
-  else if (found) app.innerHTML = viewerMarkup(menu, shown.section, shown.dish);
-  else app.innerHTML = carta(menu);
-
+  app.innerHTML = shellMarkup(menu);
+  mountShell(menu);
+  paintShell(menu, state);
   window.scrollTo(0, 0);
-  if (found) mountViewer(menu, shown.dish);
+
+  if (state.found && !pedido) {
+    placeQueue.push({ menu, id: state.found.dish.id });
+    history.replaceState({}, "", appHref(menu));
+  }
 }
 
 function landing() {
@@ -386,6 +422,9 @@ function urlRow(menu, label) {
 
 function carta(menu) {
   const copy = copyOf(menu);
+  const picking = pickMode;
+  const live = Boolean(active?.session);
+  const arHidden = active?.arReady === false || live;
   const sections = MENUS[menu].sections.map((section) => {
     const title = textSection(menu, section).title;
     return `
@@ -394,13 +433,14 @@ function carta(menu) {
       <ul class="dishes">
         ${section.dishes.map((item) => {
           const dish = textDish(menu, item);
+          const picked = pickedIds.includes(item.id);
           return `
           <li>
-            <a class="dish" data-nav href="${esc(appHref(menu, dish.id))}">
+            <button class="dish${picked ? " is-picked" : ""}" type="button" data-pick-dish data-menu="${esc(menu)}" data-dish="${esc(item.id)}">
               <span class="dish-name">${esc(dish.name)}</span>
               <span class="dish-price">${esc(price(menu, dish.price))}</span>
               <span class="dish-blurb">${esc(dish.blurb)}</span>
-            </a>
+            </button>
           </li>
         `;
         }).join("")}
@@ -411,7 +451,7 @@ function carta(menu) {
 
   return `
     <div class="screen">
-      <article class="sheet sheet-pad menu-card" data-accent="${menu}">
+      <article class="sheet sheet-pad menu-card${picking ? " is-picking" : ""}" data-accent="${menu}">
         <header class="mast menu-mast">
           <p class="resto">${esc(copy.restaurant)}</p>
           <p class="brand">MESA ${esc(tableLabel())}</p>
@@ -419,12 +459,27 @@ function carta(menu) {
           <h1>${esc(copy.carta)}</h1>
           <p class="kitchen">${esc(copy.kitchen)}</p>
           ${langSwitch(menu)}
+          <p class="hint">${esc(copy.hint)}</p>
         </header>
         ${sections}
-        <button class="order-btn" type="button" data-action="view-order" data-menu="${esc(menu)}">
-          <span>${esc(copy.viewOrder)}</span>
-          ${cartItemCount(menu) ? `<span class="order-badge" aria-hidden="true">${cartItemCount(menu)}</span>` : ""}
-        </button>
+        <div class="place-bar"${picking ? "" : " hidden"}>
+          <p class="place-bar-label">${esc(copy.selectMode)}</p>
+          <div class="place-bar-actions">
+            <button class="place-cancel" type="button" data-action="cancel-pick">${esc(copy.cancelSelect)}</button>
+            <button class="ar-btn" type="button" data-action="place-queue" data-menu="${esc(menu)}"${pickedIds.length ? "" : " disabled"}>${esc(placeQueueLabel(copy))}</button>
+          </div>
+        </div>
+        ${!picking && placeQueue.length ? `
+        <div class="place-bar">
+          <button class="ar-btn" type="button" data-action="resume-queue">${esc(copy.placeQueueN.replace("{n}", String(placeQueue.length)))}</button>
+        </div>` : ""}
+        <div class="menu-actions"${picking ? " hidden" : ""}>
+          <button class="ar-btn" type="button" data-action="start-ar"${arHidden ? " hidden" : ""}>${esc(copy.scan)}</button>
+          <button class="order-btn" type="button" data-action="view-order" data-menu="${esc(menu)}">
+            <span>${esc(copy.viewOrder)}</span>
+            ${cartItemCount(menu) ? `<span class="order-badge" aria-hidden="true">${cartItemCount(menu)}</span>` : ""}
+          </button>
+        </div>
       </article>
     </div>
   `;
@@ -497,50 +552,39 @@ function pedidoPlacedView(menu) {
   `;
 }
 
-function viewerMarkup(menu, section, dish) {
+function shellMarkup(menu) {
   const copy = copyOf(menu);
-  const qty = cartQty(menu, dish.id);
-  const nutrients = copy.nutrients.map((item) => `
-    <div>
-      <dt>${esc(item.label)}</dt>
-      <dd>${esc(dish.nutrition[item.key])} ${esc(item.unit)}</dd>
-    </div>
-  `).join("");
-
   return `
     <section class="viewer" data-accent="${menu}">
-      <canvas class="viewer-canvas" data-model="${esc(dish.id)}" aria-label="${esc(dish.name)}"></canvas>
+      <canvas class="viewer-canvas" aria-hidden="true"></canvas>
       <div class="viewer-overlay">
-      <div class="xr-hud">
-      <a class="viewer-back" data-nav href="${esc(appHref(menu))}">
+      <div class="xr-hud" hidden>
+      <button class="viewer-back" type="button" data-action="show-menu">
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
         ${esc(copy.back)}
-      </a>
+      </button>
       <button class="viewer-order" type="button" data-action="view-order" data-menu="${esc(menu)}">
         <span>${esc(copy.viewOrder)}</span>
         ${cartItemCount(menu) ? `<span class="viewer-order-badge" aria-hidden="true">${cartItemCount(menu)}</span>` : ""}
       </button>
       <p class="viewer-hint">${esc(copy.scanReady)}</p>
       <p class="viewer-alert" hidden></p>
-      <button class="viewer-scan" type="button" data-action="start-ar" hidden>${esc(copy.scan)}</button>
-      <button class="viewer-pin" type="button" data-action="pin-dish" hidden>${esc(copy.pin)}</button>
-      <div class="viewer-card">
+      <div class="viewer-card" hidden>
         <div class="viewer-heading">
-          <h1>${esc(dish.name)}</h1>
-          <p class="price-lg">${esc(price(menu, dish.price))}</p>
-          <button class="viewer-add${qty ? " is-added" : ""}" type="button" data-action="add-dish" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}" aria-label="${esc(qty ? addedLabel(copy, qty) : copy.add)}">
+          <h1></h1>
+          <p class="price-lg"></p>
+          <button class="viewer-remove" type="button" data-action="remove-dish" aria-label="${esc(copy.removeDish)}">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M6 2.5 H10 M3.5 4.5 H12.5 M5 4.5 V13 Q5 14 6 14 H10 Q11 14 11 13 V4.5 M7 6.5 V12 M9 6.5 V12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"></path></svg>
+          </button>
+          <button class="viewer-add" type="button" data-action="add-dish" data-menu="${esc(menu)}" data-dish="" aria-label="${esc(copy.add)}">
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 2.5 V13.5 M2.5 8 H13.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path></svg>
             <span class="viewer-add-label">${esc(copy.add)}</span>
-            <span class="viewer-add-count"${qty ? "" : " hidden"}>${qty || ""}</span>
+            <span class="viewer-add-count" hidden></span>
           </button>
         </div>
         <div class="viewer-facts">
           <div class="viewer-facts-scroller" data-facts-scroller>
-            <div class="viewer-facts-track">
-              <p class="portion">${esc(dish.portion)} · ${esc(section.title)}</p>
-              <dl class="nutrition">${nutrients}</dl>
-              <p class="viewer-allergens">${esc(copy.allergensTitle)}: ${dish.allergens.length ? esc(dish.allergens.join(", ")) : esc(copy.noAllergens)}</p>
-            </div>
+            <div class="viewer-facts-track"></div>
           </div>
           <button class="viewer-facts-next" type="button" data-facts-next data-next-label="${esc(copy.factsNext)}" data-back-label="${esc(copy.factsBack)}" aria-label="${esc(copy.factsNext)}" hidden>
             <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M6 3 L11 8 L6 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
@@ -548,7 +592,7 @@ function viewerMarkup(menu, section, dish) {
         </div>
       </div>
       </div>
-      <div class="xr-menu" hidden></div>
+      <div class="xr-menu"></div>
       </div>
     </section>
   `;
@@ -565,6 +609,47 @@ function missing(menu) {
       </article>
     </div>
   `;
+}
+
+function dishInfoView(menu, section, dish) {
+  const copy = copyOf(menu);
+  const qty = cartQty(menu, dish.id);
+  return `
+    <div class="screen">
+      <article class="sheet sheet-pad" data-accent="${menu}">
+        <button class="back" type="button" data-action="show-menu">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
+          ${esc(copy.back)}
+        </button>
+        <p class="eyebrow">${esc(section.title)}</p>
+        <h1 class="dish-title">${esc(dish.name)}</h1>
+        <p class="price-lg">${esc(price(menu, dish.price))}</p>
+        <p class="portion">${esc(dish.portion)}</p>
+        <p class="desc">${esc(dish.description || dish.blurb)}</p>
+        <dl class="nutrition">${copy.nutrients.map((item) => `
+          <div>
+            <dt>${esc(item.label)}</dt>
+            <dd>${esc(dish.nutrition[item.key])} ${esc(item.unit)}</dd>
+          </div>
+        `).join("")}</dl>
+        <p class="desc">${esc(copy.allergensTitle)}: ${dish.allergens.length ? esc(dish.allergens.join(", ")) : esc(copy.noAllergens)}</p>
+        <div class="menu-actions">
+          <button class="order-btn order-btn-place${qty ? " is-added" : ""}" type="button" data-action="add-dish" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}" aria-label="${esc(qty ? addedLabel(copy, qty) : copy.add)}">
+            <span class="viewer-add-label">${esc(copy.add)}</span>
+            <span class="viewer-add-count"${qty ? "" : " hidden"}>${qty || ""}</span>
+          </button>
+        </div>
+      </article>
+    </div>
+  `;
+}
+
+function showDishInfo(menu, dishId) {
+  const found = findDish(menu, dishId);
+  const menuSlot = app.querySelector(".xr-menu");
+  if (!found || !menuSlot) return;
+  menuSlot.innerHTML = dishInfoView(menu, textSection(menu, found.section), textDish(menu, found.dish));
+  menuSlot.scrollTop = 0;
 }
 
 function arErrorMessage(error, copy) {
@@ -659,32 +744,160 @@ function setViewerHint(text) {
   if (hint) hint.textContent = text;
 }
 
-function mountViewer(menu, dish) {
+function syncArButton() {
+  const live = Boolean(active?.session);
+  app.querySelectorAll("[data-action='start-ar']").forEach((btn) => {
+    btn.hidden = active?.arReady === false || live;
+  });
+}
+
+function viewerEl() {
+  return app.querySelector(".viewer");
+}
+
+function showMenuLayer() {
+  const viewer = viewerEl();
+  const hud = app.querySelector(".xr-hud");
+  const card = app.querySelector(".viewer-card");
+  viewer?.classList.remove("is-placing", "is-detail");
+  if (card) card.hidden = true;
+  active?.selectRing?.removeFromParent();
+  if (active) active.selectedGroup = null;
+  if (active?.session) {
+    viewer?.classList.add("is-live");
+    if (hud) hud.hidden = true;
+    active.suspendPlace = true;
+    if (active.reticle) active.reticle.visible = false;
+  } else {
+    viewer?.classList.remove("is-live");
+    if (hud) hud.hidden = true;
+  }
+  syncArButton();
+}
+
+function showPlacingLayer() {
+  const viewer = viewerEl();
+  const hud = app.querySelector(".xr-hud");
+  const card = app.querySelector(".viewer-card");
+  viewer?.classList.add("is-live", "is-placing");
+  viewer?.classList.remove("is-detail");
+  if (hud) hud.hidden = false;
+  if (card) card.hidden = true;
+  active?.selectRing?.removeFromParent();
+  if (active) {
+    active.selectedGroup = null;
+    active.suspendPlace = false;
+  }
+}
+
+function showDetailLayer() {
+  const viewer = viewerEl();
+  const hud = app.querySelector(".xr-hud");
+  const card = app.querySelector(".viewer-card");
+  viewer?.classList.add("is-live", "is-detail");
+  viewer?.classList.remove("is-placing");
+  if (hud) hud.hidden = false;
+  if (card) card.hidden = false;
+  if (active) active.suspendPlace = true;
+}
+
+function paintShell(menu, state) {
+  const menuSlot = app.querySelector(".xr-menu");
+  if (!menuSlot) return;
+  const placing = viewerEl()?.classList.contains("is-placing");
+
+  if (state?.pedido) {
+    if (active?.session) retireUnpinnedLive(active);
+    showMenuLayer();
+    menuSlot.innerHTML = pedidoView(menu);
+    menuSlot.scrollTop = 0;
+    return;
+  }
+
+  if (state?.missing) {
+    showMenuLayer();
+    menuSlot.innerHTML = missing(menu);
+    menuSlot.scrollTop = 0;
+    return;
+  }
+
+  menuSlot.innerHTML = carta(menu);
+  if (!placing) {
+    showMenuLayer();
+    menuSlot.scrollTop = 0;
+  }
+  syncArButton();
+}
+
+function togglePicked(id) {
+  const i = pickedIds.indexOf(id);
+  if (i >= 0) pickedIds.splice(i, 1);
+  else pickedIds.push(id);
+  if (!pickedIds.length) pickMode = false;
+}
+
+function startPlacement() {
+  const view = active;
+  if (!view || !placeQueue.length) return;
+  queryAR().then((supported) => {
+    if (active !== view || !placeQueue.length) return;
+    view.arReady = supported;
+    syncArButton();
+    if (!supported) {
+      showToast(copyOf(view.menu).arUnsupported);
+      placeQueue.length = 0;
+      return;
+    }
+    if (view.session) beginQueuePlacement();
+    else beginScan();
+  });
+}
+
+function beginQueuePlacement() {
+  const view = active;
+  const next = placeQueue[0];
+  if (!view?.session || !next) {
+    showMenuLayer();
+    return;
+  }
+  showPlacingLayer();
+  const copy = copyOf(next.menu);
+  if (view.liveDishId === next.id && view.model && view.placed && !view.placed.userData.pin) {
+    view.suspendPlace = false;
+    view.liveReady = true;
+    setViewerHint(copy.scanHint);
+    return;
+  }
+  mountLiveDish(view, next.menu, next.id);
+  const rest = placeQueue.slice(1);
+  if (rest.length) {
+    const found = findDish(rest[0].menu, rest[0].id);
+    const name = found ? textDish(rest[0].menu, found.dish).name : "";
+    setViewerHint(`${copy.scanHint} ${copy.nextInQueue.replace("{name}", name)}`);
+  } else {
+    setViewerHint(copy.scanHint);
+  }
+}
+
+function mountShell(menu) {
   const token = generation;
-  const copy = copyOf(menu);
   const canvas = app.querySelector(".viewer-canvas");
   if (!canvas) return;
 
-  const view = setupThree(canvas, dish.id, token);
+  const view = setupThree(canvas, token);
   view.menu = menu;
-  view.dishId = dish.id;
   view.uiLang = menuLang(menu);
   view.liveToken = 0;
   active = view;
+  world.menu = menu;
   bindFactsScroller();
   view.start();
 
   queryAR().then((supported) => {
     if (generation !== token || active !== view) return;
     view.arReady = supported;
-    const scan = app.querySelector(".viewer-scan");
-    if (supported) {
-      if (scan) scan.hidden = false;
-      setViewerHint(copy.scanReady);
-      return;
-    }
-    if (scan) scan.hidden = true;
-    setViewerHint(`${copy.arUnsupported} ${copy.spinHint}`);
+    syncArButton();
+    if (placeQueue.length && supported) startPlacement();
   });
 }
 
@@ -818,7 +1031,7 @@ function createDepthQuad() {
 }
 
 function isHudEvent(event) {
-  return Boolean(event.target.closest("button, a, input, select, label, .viewer-card, .xr-menu"));
+  return Boolean(event.target.closest("button, a, input, select, label, .viewer-card, .xr-menu, .place-bar, .menu-card"));
 }
 
 function keepDishDepth(root) {
@@ -1020,6 +1233,9 @@ function fillViewerCard(menu, section, dish) {
     add.dataset.dish = dish.id;
     paintAddButton(add, cartQty(menu, dish.id));
   }
+  const remove = card.querySelector("[data-action='remove-dish']");
+  if (remove) remove.setAttribute("aria-label", copy.removeDish);
+  card.hidden = false;
   active?.syncFacts?.();
 }
 
@@ -1046,6 +1262,7 @@ function selectGroup(view, group, hint) {
   if (!found) return;
   view.selectedGroup = group;
   fillViewerCard(menu, textSection(menu, found.section), textDish(menu, found.dish));
+  showDetailLayer();
   const several = placedGroups(view).length > 1;
   if (several) {
     const ring = ensureSelectRing(view);
@@ -1057,7 +1274,7 @@ function selectGroup(view, group, hint) {
     view.selectRing?.removeFromParent();
   }
   if (hint) setViewerHint(hint);
-  else if (several) setViewerHint(copyOf(menu).selectHint);
+  else setViewerHint(copyOf(menu).selectHint);
 }
 
 function placedGroups(view) {
@@ -1092,7 +1309,7 @@ function selectFromHits(view, hits, groups) {
 }
 
 function selectDishAtPointer(view, event) {
-  if (!view.session || view.suspendPlace) return false;
+  if (!view.session) return false;
   const groups = placedGroups(view);
   if (!groups.length) return false;
   const width = window.innerWidth || 1;
@@ -1119,7 +1336,7 @@ function selectDishAtPointer(view, event) {
 }
 
 function selectAlongXR(view, event) {
-  if (!view.session || view.suspendPlace) return false;
+  if (!view.session) return false;
   const space = event.inputSource?.targetRaySpace;
   const frame = event.frame;
   const referenceSpace = view.renderer.xr.getReferenceSpace();
@@ -1136,12 +1353,12 @@ function selectAlongXR(view, event) {
   return selectFromHits(view, _raycaster.intersectObjects(groups, true), groups);
 }
 
-function pinLiveDish(view) {
-  if (!view?.session) return;
+function pinLiveDish(view, { silent = false } = {}) {
+  if (!view?.session) return false;
   const copy = copyOf(view.menu);
   if (!view.dishPlaced || !view.placed || !view.model) {
-    showViewerAlert(copy.pinNeedPlace);
-    return;
+    if (!silent) showViewerAlert(copy.pinNeedPlace);
+    return false;
   }
   const group = view.placed;
   const slot = view.anchorSlot || { anchor: view.anchor, cancelled: false };
@@ -1169,10 +1386,35 @@ function pinLiveDish(view) {
   view.model = null;
   view.shadow = null;
   view.reticle.visible = false;
-  const pinBtn = app.querySelector(".viewer-pin");
-  if (pinBtn) pinBtn.hidden = true;
-  showToast(copy.pinnedToast);
-  setViewerHint(copy.pinnedHint);
+  if (!silent) showToast(copy.pinnedToast);
+  return true;
+}
+
+function commitPlacedDish(view) {
+  if (!pinLiveDish(view, { silent: true })) return;
+  placeQueue.shift();
+  showToast(copyOf(view.menu).pinnedToast);
+  if (placeQueue.length) beginQueuePlacement();
+  else showMenuLayer();
+}
+
+function removeSelectedDish() {
+  const view = active;
+  const group = view?.selectedGroup;
+  if (!view || !group) return;
+  const pin = group.userData.pin;
+  if (pin) {
+    world.pinned = world.pinned.filter((item) => item !== pin);
+    if (pin.slot) pin.slot.cancelled = true;
+    pin.slot?.anchor?.delete?.();
+  }
+  if (group === view.placed) retireUnpinnedLive(view);
+  view.selectRing?.removeFromParent();
+  view.selectedGroup = null;
+  view.scene.remove(group);
+  const card = app.querySelector(".viewer-card");
+  if (card) card.hidden = true;
+  showMenuLayer();
 }
 
 function retireUnpinnedLive(view) {
@@ -1251,62 +1493,6 @@ function mountLiveDish(view, menu, dishId) {
   });
 }
 
-function showDishInSession(menu, section, dish) {
-  const view = active;
-  const copy = copyOf(menu);
-  view.menu = menu;
-  const pinBtn = app.querySelector(".viewer-pin");
-  const scan = app.querySelector(".viewer-scan");
-  if (scan) scan.hidden = true;
-  if (view.liveDishId === dish.id && view.model && view.placed && !view.placed.userData.pin) {
-    view.suspendPlace = false;
-    view.liveReady = true;
-    if (pinBtn) pinBtn.hidden = false;
-    fillViewerCard(menu, section, dish);
-    if (!view.dishPlaced) setViewerHint(copy.scanHint);
-    return;
-  }
-  view.selectRing?.removeFromParent();
-  view.selectedGroup = null;
-  mountLiveDish(view, menu, dish.id);
-  fillViewerCard(menu, section, dish);
-  if (pinBtn) pinBtn.hidden = false;
-  setViewerHint(copy.scanHint);
-}
-
-function renderKeptAR(menu, plato, pedido, found) {
-  const hud = app.querySelector(".xr-hud");
-  const menuSlot = app.querySelector(".xr-menu");
-  if (!hud || !menuSlot || !active?.session) return false;
-
-  if (pedido) {
-    active.suspendPlace = true;
-    hud.hidden = true;
-    menuSlot.hidden = false;
-    menuSlot.innerHTML = pedidoView(menu);
-    menuSlot.scrollTop = 0;
-    return true;
-  }
-
-  if (found) {
-    menuSlot.hidden = true;
-    menuSlot.innerHTML = "";
-    hud.hidden = false;
-    active.suspendPlace = false;
-    showDishInSession(menu, found.section, found.dish);
-    return true;
-  }
-
-  retireUnpinnedLive(active);
-  active.suspendPlace = true;
-  active.reticle.visible = false;
-  hud.hidden = true;
-  menuSlot.hidden = false;
-  menuSlot.innerHTML = carta(menu);
-  menuSlot.scrollTop = 0;
-  return true;
-}
-
 function lockDish(view, copy, hit, referenceSpace) {
   if (!view.model || !view.placed || view.dishPlaced || view.placing) return;
   const pose = hit.getPose(referenceSpace);
@@ -1325,9 +1511,10 @@ function lockDish(view, copy, hit, referenceSpace) {
   const slot = { anchor: null, cancelled: false };
   view.anchorSlot = slot;
   view.anchor = null;
-  selectGroup(view, view.placed, placementHint(view, copy));
   const done = () => {
     view.placing = false;
+    if (slot.cancelled || active !== view || !view.session) return;
+    commitPlacedDish(view);
   };
   if (typeof hit.createAnchor === "function") {
     try {
@@ -1393,21 +1580,11 @@ function finishSession(view) {
   view.starting = false;
   view.liveReady = false;
   view.renderer.setAnimationLoop(null);
+  placeQueue.length = 0;
   if (active !== view) return;
-  const pinBtn = app.querySelector(".viewer-pin");
-  if (pinBtn) pinBtn.hidden = true;
-  if (!view.model || !view.placed) {
-    active = null;
-    generation += 1;
-    disposeView(view);
-    render();
-    return;
-  }
-  showStudio(view);
-  const scan = app.querySelector(".viewer-scan");
-  if (scan) scan.hidden = false;
-  setViewerHint(copyOf(view.menu).scanReady);
-  view.start();
+  viewerEl()?.classList.remove("is-live", "is-placing", "is-detail");
+  showMenuLayer();
+  if (view.menu) paintShell(view.menu, shellState());
 }
 
 function updateHitTest(view, copy, frame) {
@@ -1615,11 +1792,19 @@ function drawXR(view, copy, frame) {
 
 function beginScan() {
   const view = active;
-  if (!view || view.session || view.starting || !view.arReady) return;
+  if (!view || view.session || view.starting) return;
   const copy = copyOf(view.menu);
+  if (view.arReady === false) {
+    showToast(copy.arUnsupported);
+    return;
+  }
+  const viewer = viewerEl();
+  viewer?.classList.add("is-live");
   const overlay = app.querySelector(".viewer-overlay");
+  const hud = app.querySelector(".xr-hud");
+  if (hud) hud.hidden = false;
   view.starting = true;
-  view.model.rotation.y = 0;
+  if (view.model) view.model.rotation.y = 0;
   let pending;
   try {
     const sessionInit = {
@@ -1642,6 +1827,7 @@ function beginScan() {
     });
   } catch (error) {
     view.starting = false;
+    viewer?.classList.remove("is-live");
     showViewerAlert(arErrorMessage(error, copy));
     return;
   }
@@ -1661,8 +1847,8 @@ function beginScan() {
     view.studio = false;
     applyViewerLighting(view, false);
     view.dishPlaced = false;
-    view.placed.visible = false;
-    view.reticle.visible = false;
+    if (view.placed) view.placed.visible = false;
+    if (view.reticle) view.reticle.visible = false;
     view.surfaceSeen = false;
     view.surfaceValid = false;
     view.blockedSurface = false;
@@ -1670,9 +1856,9 @@ function beginScan() {
     view.overlapSeen = false;
     view.placeRequested = false;
     view.placing = false;
-    view.liveReady = true;
-    view.liveDishId = view.dishId;
-    view.suspendPlace = false;
+    view.liveReady = false;
+    view.liveDishId = null;
+    view.suspendPlace = true;
     view.liveRadius = footprintAtARScale(view);
     view.lastPointerAt = 0;
     view.renderer.xr.enabled = true;
@@ -1712,23 +1898,24 @@ function beginScan() {
       tryPlaceDish(view);
     });
 
-    const scan = app.querySelector(".viewer-scan");
-    if (scan) scan.hidden = true;
-    const pinBtn = app.querySelector(".viewer-pin");
-    if (pinBtn) pinBtn.hidden = false;
-    setViewerHint(copy.scanHint);
+    syncArButton();
+    if (placeQueue.length) beginQueuePlacement();
+    else showMenuLayer();
     view.renderer.setAnimationLoop((time, frame) => drawXR(view, copy, frame));
   }).catch((error) => {
     const session = view.session;
     view.starting = false;
     view.session = null;
     session?.end().catch(() => {});
+    viewerEl()?.classList.remove("is-live");
     if (active !== view) return;
-    showViewerAlert(arErrorMessage(error, copy));
+    const message = arErrorMessage(error, copy);
+    showViewerAlert(message);
+    showToast(message);
   });
 }
 
-function setupThree(canvas, dishId, session) {
+function setupThree(canvas) {
   const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
   renderer.setClearColor(0x000000, 0);
   if (THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -1757,21 +1944,6 @@ function setupThree(canvas, dishId, session) {
   rim.position.set(0.8, 2.8, 4.6);
   scene.add(rim);
 
-  const model = createDishModel(dishId);
-  model.scale.setScalar(DISH_SCALE_PREVIEW);
-
-  const shadow = new THREE.Mesh(
-    new THREE.CircleGeometry(0.48, 40),
-    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false })
-  );
-  shadow.rotation.x = -Math.PI / 2;
-  shadow.position.y = 0.01;
-
-  const placed = new THREE.Group();
-  placed.add(model);
-  placed.add(shadow);
-  scene.add(placed);
-
   const ring = new THREE.RingGeometry(0.07, 0.105, 48);
   ring.rotateX(-Math.PI / 2);
   const reticle = new THREE.Mesh(
@@ -1798,57 +1970,27 @@ function setupThree(canvas, dishId, session) {
   const observer = new ResizeObserver(resize);
   observer.observe(canvas);
 
-  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  let dragging = false;
-  let lastX = 0;
-  canvas.addEventListener("pointerdown", (event) => {
-    dragging = true;
-    lastX = event.clientX;
-    canvas.setPointerCapture?.(event.pointerId);
-  });
-  canvas.addEventListener("pointermove", (event) => {
-    if (!dragging || !view.studio) return;
-    view.model.rotation.y += (event.clientX - lastX) * 0.012;
-    lastX = event.clientX;
-  });
-  function onUp() {
-    dragging = false;
-  }
-  window.addEventListener("pointerup", onUp);
-
-  let frame = 0;
   const view = {
     renderer,
     scene,
     camera,
-    model,
-    shadow,
-    placed,
+    model: null,
+    shadow: null,
+    placed: null,
     reticle,
     occluder,
     depthQuad,
     observer,
-    onUp,
+    onUp() {},
     resize,
-    studio: true,
+    studio: false,
     lights: { hemi, key, fill, rim, ambient, bounce },
-    arReady: false,
+    arReady: null,
     frame: 0,
     start() {
-      frame = requestAnimationFrame(tick);
-      view.frame = frame;
+      resize();
     },
   };
-
-  loadDishModel(dishId).then((loaded) => {
-    if (generation !== session || !view.studio || loaded.userData.source !== "glb") return;
-    const spin = view.model.rotation.y;
-    placed.remove(view.model);
-    loaded.rotation.y = spin;
-    placed.add(loaded);
-    view.model = loaded;
-    setDishScale(view, DISH_SCALE_PREVIEW);
-  });
 
   const depthTexture2D = depthQuad.userData.depthTexture2D;
   depthQuad.onBeforeRender = (activeRenderer) => {
@@ -1867,14 +2009,6 @@ function setupThree(canvas, dishId, session) {
     uniforms.uRawToMeters.value = info.rawValueToMeters > 0 ? info.rawValueToMeters : 1;
     uniforms.uPack.value = view.session?.depthDataFormat === "luminance-alpha" || view.session?.depthDataFormat === "unsigned-short" ? 1 : 0;
   };
-
-  function tick() {
-    if (generation !== session || !view.studio) return;
-    if (!dragging && !reduceMotion) view.model.rotation.y += 0.005;
-    renderer.render(scene, camera);
-    frame = requestAnimationFrame(tick);
-    view.frame = frame;
-  }
 
   return view;
 }
@@ -1941,7 +2075,35 @@ async function copySlug(button) {
   }, 1600);
 }
 
+function onPointerDown(event) {
+  const dish = event.target.closest("[data-pick-dish]");
+  if (!dish || pickMode) return;
+  holdFired = false;
+  const id = dish.dataset.dish;
+  const menu = dish.dataset.menu;
+  window.clearTimeout(holdTimer);
+  holdTimer = window.setTimeout(() => {
+    holdFired = true;
+    pickMode = true;
+    pickedIds = [];
+    togglePicked(id);
+    paintShell(menu, shellState());
+  }, 500);
+}
+
+function onPointerEnd() {
+  window.clearTimeout(holdTimer);
+}
+
 function onClick(event) {
+  if (holdFired) {
+    holdFired = false;
+    if (event.target.closest("[data-pick-dish]")) {
+      event.preventDefault();
+      return;
+    }
+  }
+
   const nav = event.target.closest("a[data-nav]");
   if (nav) {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
@@ -1951,7 +2113,30 @@ function onClick(event) {
     return;
   }
 
-  if (active?.session && event.target.closest(".viewer-back, .viewer-card, .viewer-scan, .viewer-order")) {
+  const pick = event.target.closest("[data-pick-dish]");
+  if (pick) {
+    event.preventDefault();
+    const menu = pick.dataset.menu;
+    const id = pick.dataset.dish;
+    if (pickMode) {
+      togglePicked(id);
+      paintShell(menu, shellState());
+      return;
+    }
+    queryAR().then((supported) => {
+      if (active) active.arReady = supported;
+      syncArButton();
+      if (!supported) {
+        showDishInfo(menu, id);
+        return;
+      }
+      placeQueue.push({ menu, id });
+      startPlacement();
+    });
+    return;
+  }
+
+  if (active?.session && event.target.closest(".viewer-back, .viewer-card, .viewer-order")) {
     active.suppressPlace = true;
   }
 
@@ -1965,9 +2150,37 @@ function onClick(event) {
     return;
   }
   if (action?.dataset.action === "copy-slug") copySlug(action);
-  if (action?.dataset.action === "start-ar") beginScan();
-  if (action?.dataset.action === "pin-dish") {
-    pinLiveDish(active);
+  if (action?.dataset.action === "start-ar") {
+    if (active?.session) showMenuLayer();
+    else beginScan();
+    return;
+  }
+  if (action?.dataset.action === "place-queue") {
+    const menu = action.dataset.menu;
+    pickedIds.forEach((id) => placeQueue.push({ menu, id }));
+    pickMode = false;
+    pickedIds = [];
+    startPlacement();
+    return;
+  }
+  if (action?.dataset.action === "resume-queue") {
+    startPlacement();
+    return;
+  }
+  if (action?.dataset.action === "cancel-pick") {
+    pickMode = false;
+    pickedIds = [];
+    paintShell(active?.menu || route().menu, shellState());
+    return;
+  }
+  if (action?.dataset.action === "show-menu") {
+    if (active?.session) retireUnpinnedLive(active);
+    showMenuLayer();
+    paintShell(active?.menu || route().menu, shellState());
+    return;
+  }
+  if (action?.dataset.action === "remove-dish") {
+    removeSelectedDish();
     return;
   }
   if (action?.dataset.action === "add-dish") {
@@ -1997,17 +2210,12 @@ function onClick(event) {
   if (action?.dataset.action === "place-order") {
     const menu = action.dataset.menu;
     clearCartForMenu(menu);
-    if (active?.session && world.pinned.length && world.menu === menu) {
-      const hud = app.querySelector(".xr-hud");
-      const menuSlot = app.querySelector(".xr-menu");
-      if (hud && menuSlot) {
-        active.suspendPlace = true;
-        hud.hidden = true;
-        menuSlot.hidden = false;
-        menuSlot.innerHTML = pedidoPlacedView(menu);
-        menuSlot.scrollTop = 0;
-        return;
-      }
+    const menuSlot = app.querySelector(".xr-menu");
+    if (menuSlot && app.querySelector(".viewer")) {
+      showMenuLayer();
+      menuSlot.innerHTML = pedidoPlacedView(menu);
+      menuSlot.scrollTop = 0;
+      return;
     }
     app.innerHTML = pedidoPlacedView(menu);
     window.scrollTo(0, 0);
@@ -2016,6 +2224,12 @@ function onClick(event) {
 }
 
 app.addEventListener("click", onClick);
+app.addEventListener("pointerdown", onPointerDown);
+app.addEventListener("pointerup", onPointerEnd);
+app.addEventListener("pointercancel", onPointerEnd);
+app.addEventListener("contextmenu", (event) => {
+  if (event.target.closest("[data-pick-dish]")) event.preventDefault();
+});
 window.addEventListener("popstate", render);
 window.addEventListener("pagehide", stopViewer);
 render();
