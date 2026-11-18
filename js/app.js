@@ -24,7 +24,37 @@ const DISH_SCALE_AR = 0.26;
 const DISH_SCALE_SHADOW_REF = DISH_SCALE_PREVIEW;
 const VIEWER_LIGHT_STUDIO = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
 const VIEWER_LIGHT_AR = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
-const OCCLUSION_BIAS_M = 0.02;
+const OCCLUSION_BIAS_M = 0.03;
+
+const OCCLUSION_VERT_DECL = "varying float vOcclusionDepth;";
+const OCCLUSION_VERT_SET = "vOcclusionDepth = -mvPosition.z;";
+const OCCLUSION_FRAG_DECL = `
+varying float vOcclusionDepth;
+uniform sampler2D uOcclusionDepth;
+uniform int uOcclusionActive;
+uniform int uOcclusionMetersInRed;
+uniform float uOcclusionRawToMeters;
+uniform float uOcclusionPack;
+uniform mat4 uOcclusionViewToDepth;
+uniform vec4 uOcclusionViewport;
+uniform float uOcclusionBias;
+`;
+const OCCLUSION_FRAG_BODY = `
+if (uOcclusionActive == 1) {
+  vec2 occNdc = vec2(
+    (gl_FragCoord.x - uOcclusionViewport.x) / max(uOcclusionViewport.z, 1.0),
+    1.0 - (gl_FragCoord.y - uOcclusionViewport.y) / max(uOcclusionViewport.w, 1.0)
+  );
+  vec2 occUv = (uOcclusionViewToDepth * vec4(occNdc, 0.0, 1.0)).xy;
+  if (occUv.x >= 0.0 && occUv.y >= 0.0 && occUv.x <= 1.0 && occUv.y <= 1.0) {
+    vec4 occPacked = texture2D(uOcclusionDepth, occUv);
+    float realMeters = uOcclusionMetersInRed == 1
+      ? occPacked.r
+      : (uOcclusionPack == 1 ? dot(occPacked.ra, vec2(65280.0, 255.0)) : occPacked.r) * uOcclusionRawToMeters;
+    if (realMeters > 0.08 && realMeters < 6.0 && realMeters + uOcclusionBias < vOcclusionDepth) discard;
+  }
+}
+`;
 
 const _hitPos = new THREE.Vector3();
 const _hitQuat = new THREE.Quaternion();
@@ -483,13 +513,6 @@ function carta(menu) {
           <p class="hint">${esc(copy.hint)}</p>
         </header>
         ${sections}
-        <div class="place-bar"${picking ? "" : " hidden"}>
-          <p class="place-bar-label">${esc(copy.selectMode)}</p>
-          <div class="place-bar-actions">
-            <button class="place-cancel" type="button" data-action="cancel-pick">${esc(copy.cancelSelect)}</button>
-            <button class="ar-btn" type="button" data-action="place-queue" data-menu="${esc(menu)}"${pickedIds.length ? "" : " disabled"}>${esc(placeQueueLabel(copy))}</button>
-          </div>
-        </div>
         ${!picking && placeQueue.length ? `
         <div class="place-bar">
           <button class="ar-btn" type="button" data-action="resume-queue">${esc(copy.placeQueueN.replace("{n}", String(placeQueue.length)))}</button>
@@ -614,6 +637,13 @@ function shellMarkup(menu) {
       </div>
       </div>
       <div class="xr-menu"></div>
+      <div class="pick-dock" hidden>
+        <p class="pick-dock-label">${esc(copy.selectMode)}</p>
+        <div class="pick-dock-actions">
+          <button class="place-cancel" type="button" data-action="cancel-pick">${esc(copy.cancelSelect)}</button>
+          <button class="ar-btn" type="button" data-action="place-queue" data-menu="${esc(menu)}">${esc(copy.placeQueue)}</button>
+        </div>
+      </div>
       </div>
     </section>
   `;
@@ -870,6 +900,7 @@ function paintShell(menu, state) {
     menuSlot.scrollTop = 0;
   }
   syncArButton();
+  applyPickState(menu);
 }
 
 function togglePicked(id) {
@@ -877,6 +908,26 @@ function togglePicked(id) {
   if (i >= 0) pickedIds.splice(i, 1);
   else pickedIds.push(id);
   if (!pickedIds.length) pickMode = false;
+}
+
+function applyPickState(menu) {
+  const copy = copyOf(menu);
+  app.querySelectorAll("[data-pick-dish]").forEach((btn) => {
+    btn.classList.toggle("is-picked", pickedIds.includes(btn.dataset.dish));
+  });
+  app.querySelector(".menu-card")?.classList.toggle("is-picking", pickMode);
+  app.querySelector(".menu-actions")?.toggleAttribute("hidden", pickMode);
+  const dock = app.querySelector(".pick-dock");
+  if (!dock) return;
+  dock.hidden = !pickMode;
+  const label = dock.querySelector(".pick-dock-label");
+  if (label) label.textContent = copy.selectMode;
+  const placeBtn = dock.querySelector("[data-action='place-queue']");
+  if (placeBtn) {
+    placeBtn.dataset.menu = menu;
+    placeBtn.disabled = pickedIds.length < 1;
+    placeBtn.textContent = placeQueueLabel(copy);
+  }
 }
 
 function prefetchQueueModels() {
@@ -1101,7 +1152,75 @@ function createDepthQuad() {
 }
 
 function isHudEvent(event) {
-  return Boolean(event.target.closest("button, a, input, select, label, .viewer-card, .xr-menu, .place-bar, .menu-card"));
+  return Boolean(event.target.closest("button, a, input, select, label, .viewer-card, .xr-menu, .place-bar, .menu-card, .pick-dock"));
+}
+
+function occlusionUniforms(view) {
+  if (view.occlusionShared) return view.occlusionShared;
+  const tex = view.depthQuad?.userData.depthTexture2D;
+  view.occlusionShared = {
+    uOcclusionDepth: { value: tex },
+    uOcclusionActive: { value: 0 },
+    uOcclusionMetersInRed: { value: 1 },
+    uOcclusionRawToMeters: { value: 1 },
+    uOcclusionPack: { value: 0 },
+    uOcclusionViewToDepth: { value: new THREE.Matrix4() },
+    uOcclusionViewport: { value: new THREE.Vector4(0, 0, 1, 1) },
+    uOcclusionBias: { value: OCCLUSION_BIAS_M },
+  };
+  return view.occlusionShared;
+}
+
+function setOcclusionActive(view, on) {
+  const u = occlusionUniforms(view);
+  u.uOcclusionActive.value = on ? 1 : 0;
+}
+
+function patchOcclusionMaterial(material) {
+  if (!material || material.userData.mesaOcclusion) return;
+  material.userData.mesaOcclusion = true;
+  const previous = material.onBeforeCompile;
+  material.onBeforeCompile = (shader, renderer) => {
+    previous?.(shader, renderer);
+    const view = active;
+    if (view) Object.assign(shader.uniforms, occlusionUniforms(view));
+    if (!shader.vertexShader.includes("vOcclusionDepth")) {
+      if (shader.vertexShader.includes("#include <common>")) {
+        shader.vertexShader = shader.vertexShader.replace(
+          "#include <common>",
+          `#include <common>\n${OCCLUSION_VERT_DECL}`
+        );
+      } else {
+        shader.vertexShader = `${OCCLUSION_VERT_DECL}\n${shader.vertexShader}`;
+      }
+      if (shader.vertexShader.includes("#include <project_vertex>")) {
+        shader.vertexShader = shader.vertexShader.replace(
+          "#include <project_vertex>",
+          `#include <project_vertex>\n${OCCLUSION_VERT_SET}`
+        );
+      }
+    }
+    if (!shader.fragmentShader.includes("uOcclusionActive")) {
+      if (shader.fragmentShader.includes("#include <common>")) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          "#include <common>",
+          `#include <common>\n${OCCLUSION_FRAG_DECL}`
+        );
+      } else {
+        shader.fragmentShader = `${OCCLUSION_FRAG_DECL}\n${shader.fragmentShader}`;
+      }
+      if (shader.fragmentShader.includes("#include <dithering_fragment>")) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          "#include <dithering_fragment>",
+          `#include <dithering_fragment>\n${OCCLUSION_FRAG_BODY}`
+        );
+      } else {
+        shader.fragmentShader += `\n${OCCLUSION_FRAG_BODY}`;
+      }
+    }
+  };
+  material.customProgramCacheKey = () => "mesa-occlusion-v2";
+  material.needsUpdate = true;
 }
 
 function keepDishDepth(root) {
@@ -1115,6 +1234,7 @@ function keepDishDepth(root) {
       mat.polygonOffsetFactor = 1;
       mat.polygonOffsetUnits = 1;
       if (!mat.transparent && !mat.alphaTest) mat.depthWrite = true;
+      patchOcclusionMaterial(mat);
     }
   });
 }
@@ -1777,6 +1897,14 @@ function uploadCpuDepth(view, depthInfo) {
   else uniform.identity();
   view.depthQuad.material.uniforms.uMetersInRed.value = 1;
   view.depthQuad.userData.externalDepth = null;
+  const occ = occlusionUniforms(view);
+  occ.uOcclusionDepth.value = texture;
+  occ.uOcclusionMetersInRed.value = 1;
+  occ.uOcclusionRawToMeters.value = 1;
+  occ.uOcclusionPack.value = 0;
+  if (mapping) occ.uOcclusionViewToDepth.value.fromArray(mapping);
+  else occ.uOcclusionViewToDepth.value.identity();
+  setOcclusionActive(view, true);
   return true;
 }
 
@@ -1811,6 +1939,7 @@ function prepareOcclusion(view, frame) {
   view.gpuDepth = null;
   if (view.occluder) view.occluder.visible = false;
   if (view.depthQuad) view.depthQuad.visible = false;
+  setOcclusionActive(view, false);
   const referenceSpace = view.renderer.xr.getReferenceSpace();
   if (!referenceSpace || !view.depthQuad) return;
   const pose = frame.getViewerPose(referenceSpace);
@@ -1818,7 +1947,7 @@ function prepareOcclusion(view, frame) {
   if (!xrView) return;
   view.occlusionProj = xrView.projectionMatrix;
 
-  if (typeof frame.getDepthInformation === "function" && view.session?.depthUsage !== "gpu-optimized") {
+  if (typeof frame.getDepthInformation === "function") {
     let depth = null;
     try {
       depth = frame.getDepthInformation(xrView);
@@ -1844,6 +1973,16 @@ function prepareOcclusion(view, frame) {
     const uniform = view.depthQuad.material.uniforms.uViewToDepth.value;
     if (mapping) uniform.fromArray(mapping);
     else uniform.identity();
+    const occ = occlusionUniforms(view);
+    occ.uOcclusionMetersInRed.value = 0;
+    occ.uOcclusionRawToMeters.value = gpu.rawValueToMeters > 0 ? gpu.rawValueToMeters : 1;
+    occ.uOcclusionPack.value = view.session?.depthDataFormat === "luminance-alpha" || view.session?.depthDataFormat === "unsigned-short" ? 1 : 0;
+    if (mapping) occ.uOcclusionViewToDepth.value.fromArray(mapping);
+    else occ.uOcclusionViewToDepth.value.identity();
+    if (gpu.textureType !== "texture-array") {
+      occ.uOcclusionDepth.value = view.depthQuad.userData.depthTexture2D;
+      setOcclusionActive(view, true);
+    }
     view.depthQuad.visible = true;
     return;
   }
@@ -2081,11 +2220,17 @@ function setupThree(canvas) {
   };
 
   const depthTexture2D = depthQuad.userData.depthTexture2D;
-  depthQuad.onBeforeRender = (activeRenderer) => {
+  function bindOcclusionTextures(activeRenderer) {
     const gl = activeRenderer.getContext();
     const vp = gl.getParameter(gl.VIEWPORT);
     const uniforms = depthQuad.material.uniforms;
     uniforms.uViewport.value.set(vp[0], vp[1], Math.max(vp[2], 1), Math.max(vp[3], 1));
+    occlusionUniforms(view).uOcclusionViewport.value.set(
+      vp[0],
+      vp[1],
+      Math.max(vp[2], 1),
+      Math.max(vp[3], 1)
+    );
     const proj = view.occlusionProj;
     if (proj) uniforms.uProjZ.value.set(proj[10], proj[14], proj[11], proj[15]);
     const info = view.gpuDepth;
@@ -2101,7 +2246,9 @@ function setupThree(canvas) {
     uniforms.uMetersInRed.value = 0;
     uniforms.uRawToMeters.value = info.rawValueToMeters > 0 ? info.rawValueToMeters : 1;
     uniforms.uPack.value = view.session?.depthDataFormat === "luminance-alpha" || view.session?.depthDataFormat === "unsigned-short" ? 1 : 0;
-  };
+  }
+  depthQuad.onBeforeRender = bindOcclusionTextures;
+  scene.onBeforeRender = bindOcclusionTextures;
 
   return view;
 }
@@ -2168,24 +2315,38 @@ async function copySlug(button) {
   }, 1600);
 }
 
+let holdX = 0;
+let holdY = 0;
+
 function onPointerDown(event) {
   const dish = event.target.closest("[data-pick-dish]");
   if (!dish || pickMode) return;
   holdFired = false;
+  holdX = event.clientX;
+  holdY = event.clientY;
   const id = dish.dataset.dish;
   const menu = dish.dataset.menu;
   window.clearTimeout(holdTimer);
   holdTimer = window.setTimeout(() => {
+    holdTimer = 0;
     holdFired = true;
     pickMode = true;
-    pickedIds = [];
-    togglePicked(id);
-    paintShell(menu, shellState());
-  }, 500);
+    pickedIds = [id];
+    applyPickState(menu);
+  }, 450);
+}
+
+function onPointerMove(event) {
+  if (!holdTimer) return;
+  if (Math.hypot(event.clientX - holdX, event.clientY - holdY) > 12) {
+    window.clearTimeout(holdTimer);
+    holdTimer = 0;
+  }
 }
 
 function onPointerEnd() {
   window.clearTimeout(holdTimer);
+  holdTimer = 0;
 }
 
 function onClick(event) {
@@ -2213,7 +2374,7 @@ function onClick(event) {
     const id = pick.dataset.dish;
     if (pickMode) {
       togglePicked(id);
-      paintShell(menu, shellState());
+      applyPickState(menu);
       return;
     }
     queryAR().then((supported) => {
@@ -2253,6 +2414,7 @@ function onClick(event) {
     setPlaceQueue(pickedIds.map((id) => makeQueueItem(menu, id)));
     pickMode = false;
     pickedIds = [];
+    applyPickState(menu);
     startPlacement();
     return;
   }
@@ -2263,7 +2425,7 @@ function onClick(event) {
   if (action?.dataset.action === "cancel-pick") {
     pickMode = false;
     pickedIds = [];
-    paintShell(active?.menu || route().menu, shellState());
+    applyPickState(active?.menu || route().menu);
     return;
   }
   if (action?.dataset.action === "show-menu") {
@@ -2318,6 +2480,7 @@ function onClick(event) {
 
 app.addEventListener("click", onClick);
 app.addEventListener("pointerdown", onPointerDown);
+app.addEventListener("pointermove", onPointerMove);
 app.addEventListener("pointerup", onPointerEnd);
 app.addEventListener("pointercancel", onPointerEnd);
 app.addEventListener("contextmenu", (event) => {

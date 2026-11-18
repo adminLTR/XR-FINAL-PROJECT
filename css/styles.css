@@ -515,6 +515,48 @@ button { cursor: pointer; }
   margin-top: 22px;
 }
 
+.pick-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  display: grid;
+  gap: 8px;
+  padding: 12px 16px calc(14px + env(safe-area-inset-bottom));
+  background:
+    linear-gradient(180deg, rgba(243, 231, 210, 0), #f3e7d2 16px),
+    #f3e7d2;
+  box-shadow: 0 -16px 36px rgba(0, 0, 0, 0.28);
+  pointer-events: auto;
+}
+
+.pick-dock[hidden] { display: none !important; }
+
+.pick-dock-label {
+  margin: 0;
+  text-align: center;
+  color: var(--ink);
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.pick-dock-actions {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+}
+
+.menu-card.is-picking {
+  padding-bottom: 132px;
+}
+
+.viewer.is-placing .pick-dock,
+.viewer.is-world .pick-dock,
+.viewer.is-detail .pick-dock {
+  display: none !important;
+}
+
 .place-bar[hidden] { display: none; }
 
 .place-bar-label {
@@ -811,6 +853,7 @@ button { cursor: pointer; }
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
+  touch-action: pan-y;
 }
 
 .dish:hover,
