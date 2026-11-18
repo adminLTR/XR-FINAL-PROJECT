@@ -24,15 +24,16 @@ const DISH_SCALE_AR = 0.26;
 const DISH_SCALE_SHADOW_REF = DISH_SCALE_PREVIEW;
 const VIEWER_LIGHT_STUDIO = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
 const VIEWER_LIGHT_AR = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
-const OCCLUSION_BIAS_M = 0.03;
+/** Distancia extra para que la mesa no se coma el plato; una mano sí lo tapa. */
+const OCCLUSION_BIAS_M = 0.12;
 
 const OCCLUSION_VERT_DECL = "varying float vOcclusionDepth;";
 const OCCLUSION_VERT_SET = "vOcclusionDepth = -mvPosition.z;";
 const OCCLUSION_FRAG_DECL = `
 varying float vOcclusionDepth;
 uniform sampler2D uOcclusionDepth;
-uniform int uOcclusionActive;
-uniform int uOcclusionMetersInRed;
+uniform float uOcclusionActive;
+uniform float uOcclusionMetersInRed;
 uniform float uOcclusionRawToMeters;
 uniform float uOcclusionPack;
 uniform mat4 uOcclusionViewToDepth;
@@ -40,7 +41,7 @@ uniform vec4 uOcclusionViewport;
 uniform float uOcclusionBias;
 `;
 const OCCLUSION_FRAG_BODY = `
-if (uOcclusionActive == 1) {
+if (uOcclusionActive > 0.5) {
   vec2 occNdc = vec2(
     (gl_FragCoord.x - uOcclusionViewport.x) / max(uOcclusionViewport.z, 1.0),
     1.0 - (gl_FragCoord.y - uOcclusionViewport.y) / max(uOcclusionViewport.w, 1.0)
@@ -48,10 +49,10 @@ if (uOcclusionActive == 1) {
   vec2 occUv = (uOcclusionViewToDepth * vec4(occNdc, 0.0, 1.0)).xy;
   if (occUv.x >= 0.0 && occUv.y >= 0.0 && occUv.x <= 1.0 && occUv.y <= 1.0) {
     vec4 occPacked = texture2D(uOcclusionDepth, occUv);
-    float realMeters = uOcclusionMetersInRed == 1
+    float realMeters = uOcclusionMetersInRed > 0.5
       ? occPacked.r
-      : (uOcclusionPack == 1 ? dot(occPacked.ra, vec2(65280.0, 255.0)) : occPacked.r) * uOcclusionRawToMeters;
-    if (realMeters > 0.08 && realMeters < 6.0 && realMeters + uOcclusionBias < vOcclusionDepth) discard;
+      : (uOcclusionPack > 0.5 ? dot(occPacked.ra, vec2(65280.0, 255.0)) : occPacked.r) * uOcclusionRawToMeters;
+    if (realMeters > 0.12 && realMeters < 4.0 && vOcclusionDepth - realMeters > uOcclusionBias) discard;
   }
 }
 `;
@@ -1180,46 +1181,38 @@ function patchOcclusionMaterial(material) {
   if (!material || material.userData.mesaOcclusion) return;
   material.userData.mesaOcclusion = true;
   const previous = material.onBeforeCompile;
+  const previousKey = material.customProgramCacheKey?.bind(material);
   material.onBeforeCompile = (shader, renderer) => {
     previous?.(shader, renderer);
     const view = active;
     if (view) Object.assign(shader.uniforms, occlusionUniforms(view));
+    const canInject =
+      shader.vertexShader.includes("#include <project_vertex>") &&
+      shader.fragmentShader.includes("#include <dithering_fragment>");
+    if (!canInject) return;
     if (!shader.vertexShader.includes("vOcclusionDepth")) {
-      if (shader.vertexShader.includes("#include <common>")) {
-        shader.vertexShader = shader.vertexShader.replace(
-          "#include <common>",
-          `#include <common>\n${OCCLUSION_VERT_DECL}`
-        );
-      } else {
-        shader.vertexShader = `${OCCLUSION_VERT_DECL}\n${shader.vertexShader}`;
-      }
-      if (shader.vertexShader.includes("#include <project_vertex>")) {
-        shader.vertexShader = shader.vertexShader.replace(
-          "#include <project_vertex>",
-          `#include <project_vertex>\n${OCCLUSION_VERT_SET}`
-        );
-      }
+      shader.vertexShader = shader.vertexShader.replace(
+        "#include <common>",
+        `#include <common>\n${OCCLUSION_VERT_DECL}`
+      );
+      shader.vertexShader = shader.vertexShader.replace(
+        "#include <project_vertex>",
+        `#include <project_vertex>\n${OCCLUSION_VERT_SET}`
+      );
     }
     if (!shader.fragmentShader.includes("uOcclusionActive")) {
-      if (shader.fragmentShader.includes("#include <common>")) {
-        shader.fragmentShader = shader.fragmentShader.replace(
-          "#include <common>",
-          `#include <common>\n${OCCLUSION_FRAG_DECL}`
-        );
-      } else {
-        shader.fragmentShader = `${OCCLUSION_FRAG_DECL}\n${shader.fragmentShader}`;
-      }
-      if (shader.fragmentShader.includes("#include <dithering_fragment>")) {
-        shader.fragmentShader = shader.fragmentShader.replace(
-          "#include <dithering_fragment>",
-          `#include <dithering_fragment>\n${OCCLUSION_FRAG_BODY}`
-        );
-      } else {
-        shader.fragmentShader += `\n${OCCLUSION_FRAG_BODY}`;
-      }
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "#include <common>",
+        `#include <common>\n${OCCLUSION_FRAG_DECL}`
+      );
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "#include <dithering_fragment>",
+        `#include <dithering_fragment>\n${OCCLUSION_FRAG_BODY}`
+      );
     }
   };
-  material.customProgramCacheKey = () => "mesa-occlusion-v2";
+  material.customProgramCacheKey = () =>
+    `${previousKey ? previousKey() : ""}|mesa-occlusion-v3`;
   material.needsUpdate = true;
 }
 
@@ -1956,7 +1949,7 @@ function prepareOcclusion(view, frame) {
     }
     if (depth && uploadCpuDepth(view, depth)) {
       view.depthQuad.material.uniforms.uUseArray.value = 0;
-      view.depthQuad.visible = true;
+      view.depthQuad.visible = false;
       return;
     }
   }
@@ -1983,7 +1976,7 @@ function prepareOcclusion(view, frame) {
       occ.uOcclusionDepth.value = view.depthQuad.userData.depthTexture2D;
       setOcclusionActive(view, true);
     }
-    view.depthQuad.visible = true;
+    view.depthQuad.visible = false;
     return;
   }
 
