@@ -1029,10 +1029,10 @@ function useLayerDepthBuffer() {
   const proto = XRProjectionLayer.prototype;
   if (proto.__mesaUseDepth) return;
   try {
-    Object.defineProperty(proto, "ignoreDepthValues", { configurable: true, get: () => false });
+    Object.defineProperty(proto, "ignoreDepthValues", { configurable: true, get: () => true });
     proto.__mesaUseDepth = true;
   } catch {
-    /* El navegador no deja cambiar el flag; el quad igual escribe gl_FragDepth. */
+    /* El navegador no deja cambiar el flag. */
   }
 }
 
@@ -1221,13 +1221,12 @@ function keepDishDepth(root) {
     const list = Array.isArray(node.material) ? node.material : node.material ? [node.material] : [];
     for (const mat of list) {
       if (!mat) continue;
-      mat.depthTest = true;
-      mat.depthFunc = THREE.LessEqualDepth;
-      mat.polygonOffset = true;
-      mat.polygonOffsetFactor = 1;
-      mat.polygonOffsetUnits = 1;
-      if (!mat.transparent && !mat.alphaTest) mat.depthWrite = true;
-      patchOcclusionMaterial(mat);
+      if (mat.userData.mesaOcclusion) {
+        mat.onBeforeCompile = mat.userData.mesaOcclusionPrev || null;
+        mat.customProgramCacheKey = mat.userData.mesaOcclusionPrevKey || undefined;
+        mat.userData.mesaOcclusion = false;
+        mat.needsUpdate = true;
+      }
     }
   });
 }
@@ -2029,11 +2028,7 @@ function beginScan() {
   try {
     const sessionInit = {
       requiredFeatures: ["hit-test"],
-      optionalFeatures: ["dom-overlay", "depth-sensing", "anchors"],
-      depthSensing: {
-        usagePreference: ["cpu-optimized", "gpu-optimized"],
-        dataFormatPreference: ["float32", "luminance-alpha"],
-      },
+      optionalFeatures: ["dom-overlay", "anchors"],
       domOverlay: overlay ? { root: overlay } : undefined,
     };
     pending = navigator.xr.requestSession("immersive-ar", sessionInit).catch((error) => {
