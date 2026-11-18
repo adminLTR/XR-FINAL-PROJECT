@@ -782,7 +782,7 @@ function showMenuLayer() {
   const viewer = viewerEl();
   const hud = app.querySelector(".xr-hud");
   const card = app.querySelector(".viewer-card");
-  viewer?.classList.remove("is-placing", "is-detail");
+  viewer?.classList.remove("is-placing", "is-detail", "is-world");
   if (card) card.hidden = true;
   active?.selectRing?.removeFromParent();
   if (active) active.selectedGroup = null;
@@ -803,7 +803,7 @@ function showPlacingLayer() {
   const hud = app.querySelector(".xr-hud");
   const card = app.querySelector(".viewer-card");
   viewer?.classList.add("is-live", "is-placing");
-  viewer?.classList.remove("is-detail");
+  viewer?.classList.remove("is-detail", "is-world");
   if (hud) hud.hidden = false;
   if (card) card.hidden = true;
   active?.selectRing?.removeFromParent();
@@ -813,12 +813,30 @@ function showPlacingLayer() {
   }
 }
 
+function showWorldLayer() {
+  const viewer = viewerEl();
+  const hud = app.querySelector(".xr-hud");
+  const card = app.querySelector(".viewer-card");
+  viewer?.classList.add("is-live", "is-world");
+  viewer?.classList.remove("is-placing", "is-detail");
+  if (hud) hud.hidden = false;
+  if (card) card.hidden = true;
+  active?.selectRing?.removeFromParent();
+  if (active) {
+    active.selectedGroup = null;
+    active.suspendPlace = true;
+    active.liveReady = false;
+    if (active.reticle) active.reticle.visible = false;
+    setViewerHint(copyOf(active.menu).selectHint);
+  }
+}
+
 function showDetailLayer() {
   const viewer = viewerEl();
   const hud = app.querySelector(".xr-hud");
   const card = app.querySelector(".viewer-card");
   viewer?.classList.add("is-live", "is-detail");
-  viewer?.classList.remove("is-placing");
+  viewer?.classList.remove("is-placing", "is-world");
   if (hud) hud.hidden = false;
   if (card) card.hidden = false;
   if (active) active.suspendPlace = true;
@@ -827,7 +845,9 @@ function showDetailLayer() {
 function paintShell(menu, state) {
   const menuSlot = app.querySelector(".xr-menu");
   if (!menuSlot) return;
-  const placing = viewerEl()?.classList.contains("is-placing");
+  const placing = viewerEl()?.classList.contains("is-placing")
+    || viewerEl()?.classList.contains("is-world")
+    || viewerEl()?.classList.contains("is-detail");
 
   if (state?.pedido) {
     if (active?.session) retireUnpinnedLive(active);
@@ -895,7 +915,8 @@ function beginQueuePlacement() {
   const view = active;
   const next = placeQueue[0];
   if (!view?.session || !next) {
-    showMenuLayer();
+    if (view?.session) showWorldLayer();
+    else showMenuLayer();
     return;
   }
   prefetchQueueModels();
@@ -1450,7 +1471,7 @@ function commitPlacedDish(view) {
   view.queueItem = null;
   showToast(copyOf(view.menu).pinnedToast);
   if (placeQueue.length) beginQueuePlacement();
-  else showMenuLayer();
+  else showWorldLayer();
 }
 
 function removeSelectedDish() {
@@ -1469,7 +1490,8 @@ function removeSelectedDish() {
   view.scene.remove(group);
   const card = app.querySelector(".viewer-card");
   if (card) card.hidden = true;
-  showMenuLayer();
+  if (view.session) showWorldLayer();
+  else showMenuLayer();
 }
 
 function retireUnpinnedLive(view) {
@@ -1502,6 +1524,7 @@ function skipFailedDish(view, menu) {
   showToast(copyOf(menu).modelFailed);
   dequeueCurrent(view);
   if (placeQueue.length) beginQueuePlacement();
+  else if (view.session) showWorldLayer();
   else showMenuLayer();
 }
 

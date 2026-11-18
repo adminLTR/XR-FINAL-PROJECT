@@ -1072,13 +1072,15 @@ button { cursor: pointer; }
 }
 
 .viewer.is-placing .xr-menu,
-.viewer.is-detail .xr-menu {
+.viewer.is-detail .xr-menu,
+.viewer.is-world .xr-menu {
   visibility: hidden;
   pointer-events: none;
 }
 
 .viewer.is-placing .xr-hud,
-.viewer.is-detail .xr-hud {
+.viewer.is-detail .xr-hud,
+.viewer.is-world .xr-hud {
   z-index: 5;
 }
 
