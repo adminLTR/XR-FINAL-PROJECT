@@ -975,7 +975,6 @@ button { cursor: pointer; }
 
 .viewer-back,
 .viewer-order,
-.viewer-lang,
 .viewer-hint,
 .viewer-alert,
 .viewer-card,
@@ -1003,34 +1002,6 @@ button { cursor: pointer; }
 }
 
 .xr-menu[hidden] { display: none; }
-
-.viewer-lang {
-  top: calc(60px + env(safe-area-inset-top));
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 3;
-}
-
-.viewer-lang .lang-switch {
-  margin: 0;
-  gap: 6px;
-}
-
-.viewer-lang .lang-btn {
-  min-height: 32px;
-  padding: 0 12px;
-  font-size: 0.78rem;
-  background: rgba(16, 12, 10, 0.72);
-  color: #f6efe4;
-  border-color: rgba(255, 248, 238, 0.22);
-  backdrop-filter: blur(8px);
-}
-
-.viewer-lang .lang-btn.is-on {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff8ee;
-}
 
 .viewer-back {
   top: calc(14px + env(safe-area-inset-top));

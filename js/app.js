@@ -462,7 +462,6 @@ function pedidoView(menu) {
           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
           ${esc(copy.back)}
         </a>
-        ${langSwitch(menu)}
         <p class="eyebrow">MESA ${esc(tableLabel())}</p>
         <h1 class="dish-title">${esc(copy.orderTitle)}</h1>
         ${empty
@@ -491,7 +490,6 @@ function pedidoPlacedView(menu) {
           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
           ${esc(copy.back)}
         </a>
-        ${langSwitch(menu)}
         <h1 class="dish-title">${esc(copy.orderPlacedTitle)}</h1>
         <p class="desc">${esc(copy.orderPlacedBody)}</p>
       </article>
@@ -518,7 +516,6 @@ function viewerMarkup(menu, section, dish) {
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
         ${esc(copy.back)}
       </a>
-      <div class="viewer-lang">${langSwitch(menu)}</div>
       <button class="viewer-order" type="button" data-action="view-order" data-menu="${esc(menu)}">
         <span>${esc(copy.viewOrder)}</span>
         ${cartItemCount(menu) ? `<span class="viewer-order-badge" aria-hidden="true">${cartItemCount(menu)}</span>` : ""}
@@ -562,7 +559,6 @@ function missing(menu) {
   return `
     <div class="screen">
       <article class="sheet sheet-pad" data-accent="${menu}">
-        ${langSwitch(menu)}
         <h1 class="dish-title">${esc(copy.missingTitle)}</h1>
         <p class="desc">${esc(copy.missingBody)}</p>
         <p class="desc"><a data-nav href="${esc(appHref(menu))}">${esc(copy.back)}</a></p>
