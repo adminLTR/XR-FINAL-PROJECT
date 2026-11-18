@@ -1129,6 +1129,7 @@ button { cursor: pointer; }
 
 .viewer.is-live .viewer-overlay {
   pointer-events: auto;
+  touch-action: none;
 }
 
 .viewer:not(.is-live) .viewer-canvas,

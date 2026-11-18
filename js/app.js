@@ -73,6 +73,11 @@ const _raycaster = new THREE.Raycaster();
 const _rayOrigin = new THREE.Vector3();
 const _rayDir = new THREE.Vector3();
 const _rayMatrix = new THREE.Matrix4();
+const _tablePlane = new THREE.Plane();
+const _tableHit = new THREE.Vector3();
+const _worldUp = new THREE.Vector3(0, 1, 0);
+const GRAB_DRAG_PX = 8;
+const GRAB_MAX_M = 1.8;
 
 let generation = 0;
 let active = null;
@@ -736,7 +741,7 @@ function disposeView(view) {
   cancelAnimationFrame(view.frame);
   cancelSource(view.hitTestSource);
   view.hitTestSource = null;
-  view.overlay?.removeEventListener("pointerdown", view.onPlacePointer);
+  unbindOverlay(view);
   if (view.overlay) view.overlay.style.pointerEvents = "";
   view.occluder?.geometry.dispose();
   view.occluder?.material.dispose();
@@ -767,7 +772,7 @@ function stopViewer() {
   current.anchor?.delete?.();
   current.anchor = null;
   current.anchorSlot = null;
-  current.overlay?.removeEventListener("pointerdown", current.onPlacePointer);
+  unbindOverlay(current);
   if (current.overlay) current.overlay.style.pointerEvents = "";
   current.occluder?.geometry.dispose();
   current.occluder?.material.dispose();
@@ -1156,6 +1161,10 @@ function isHudEvent(event) {
   return Boolean(event.target.closest("button, a, input, select, label, .viewer-card, .xr-menu, .place-bar, .menu-card, .pick-dock"));
 }
 
+function isHudControl(event) {
+  return Boolean(event.target.closest("button, a, input, select, label"));
+}
+
 function occlusionUniforms(view) {
   if (view.occlusionShared) return view.occlusionShared;
   const tex = view.depthQuad?.userData.depthTexture2D;
@@ -1369,8 +1378,9 @@ function liveRadiusOf(view) {
   return view.liveRadius > 0 ? view.liveRadius : 0.22;
 }
 
-function overlapsPins(point, radius) {
+function overlapsPins(point, radius, ignore = null) {
   for (const pin of world.pinned) {
+    if (pin.group === ignore) continue;
     pin.group.getWorldPosition(_pinPos);
     const dx = _pinPos.x - point.x;
     const dz = _pinPos.z - point.z;
@@ -1460,7 +1470,7 @@ function selectGroup(view, group, hint) {
     view.selectRing?.removeFromParent();
   }
   if (hint) setViewerHint(hint);
-  else setViewerHint(copyOf(menu).selectHint);
+  else setViewerHint(copyOf(menu).spinHint);
 }
 
 function placedGroups(view) {
@@ -1494,15 +1504,50 @@ function selectFromHits(view, hits, groups) {
   return true;
 }
 
+function pointerNdc(event, target) {
+  const width = window.innerWidth || 1;
+  const height = window.innerHeight || 1;
+  target.set((event.clientX / width) * 2 - 1, -(event.clientY / height) * 2 + 1);
+  return target;
+}
+
+function setPointerRay(view, event) {
+  pointerNdc(event, _ndc);
+  const cam = xrCamera(view);
+  cam.updateMatrixWorld(true);
+  _raycaster.setFromCamera(_ndc, cam);
+  return cam;
+}
+
+function dishHitAtPointer(view, event) {
+  if (!view.session) return null;
+  const groups = placedGroups(view);
+  if (!groups.length) return null;
+  setPointerRay(view, event);
+  const hits = _raycaster.intersectObjects(groups, true);
+  const meshHit = hits.length ? groupOf(hits[0].object, groups) : null;
+  if (meshHit) return meshHit;
+  let best = null;
+  let bestDist = Infinity;
+  for (const group of groups) {
+    group.getWorldPosition(_pinPos);
+    _tablePlane.setFromNormalAndCoplanarPoint(_worldUp, _pinPos);
+    if (!_raycaster.ray.intersectPlane(_tablePlane, _tableHit)) continue;
+    const radius = Math.max(group.userData.pin?.radius || liveRadiusOf(view), 0.08);
+    const dist = Math.hypot(_tableHit.x - _pinPos.x, _tableHit.z - _pinPos.z);
+    if (dist <= radius * 1.2 && dist < bestDist) {
+      bestDist = dist;
+      best = group;
+    }
+  }
+  return best;
+}
+
 function selectDishAtPointer(view, event) {
   if (!view.session) return false;
   const groups = placedGroups(view);
   if (!groups.length) return false;
-  const width = window.innerWidth || 1;
-  const height = window.innerHeight || 1;
-  _ndc.set((event.clientX / width) * 2 - 1, -(event.clientY / height) * 2 + 1);
-  const cam = xrCamera(view);
-  _raycaster.setFromCamera(_ndc, cam);
+  const cam = setPointerRay(view, event);
   if (selectFromHits(view, _raycaster.intersectObjects(groups, true), groups)) return true;
   let best = null;
   let bestDist = 0.16;
@@ -1537,6 +1582,96 @@ function selectAlongXR(view, event) {
   const groups = placedGroups(view);
   if (!groups.length) return false;
   return selectFromHits(view, _raycaster.intersectObjects(groups, true), groups);
+}
+
+function unbindOverlay(view) {
+  if (!view) return;
+  view.overlay?.removeEventListener("pointerdown", view.onPlacePointer);
+  view.overlay?.removeEventListener("pointermove", view.onPointerMoveAR);
+  view.overlay?.removeEventListener("pointerup", view.onPointerUpAR);
+  view.overlay?.removeEventListener("pointercancel", view.onPointerUpAR);
+  view.pointers?.clear();
+  view.grab = null;
+  view.twist = null;
+}
+
+function markLoose(group) {
+  if (!group) return;
+  group.userData.loose = true;
+  const slot = group.userData.pin?.slot;
+  if (!slot) return;
+  slot.manual = true;
+  slot.anchor?.delete?.();
+  slot.anchor = null;
+}
+
+function hitTablePoint(view, event, group, out) {
+  if (!group) return null;
+  group.getWorldPosition(_pinPos);
+  _tablePlane.setFromNormalAndCoplanarPoint(_worldUp, _pinPos);
+  setPointerRay(view, event);
+  return _raycaster.ray.intersectPlane(_tablePlane, out);
+}
+
+function beginGrab(view, event, group) {
+  if (!hitTablePoint(view, event, group, _tableHit)) return;
+  group.getWorldPosition(_pinPos);
+  view.grab = {
+    pointerId: event.pointerId,
+    group,
+    y: _pinPos.y,
+    originX: _pinPos.x,
+    originZ: _pinPos.z,
+    offsetX: _pinPos.x - _tableHit.x,
+    offsetZ: _pinPos.z - _tableHit.z,
+    startX: event.clientX,
+    startY: event.clientY,
+    moved: false,
+  };
+}
+
+function updateGrab(view, event) {
+  const grab = view.grab;
+  if (!grab || grab.pointerId !== event.pointerId || view.twist) return;
+  if (!grab.moved && Math.hypot(event.clientX - grab.startX, event.clientY - grab.startY) < GRAB_DRAG_PX) return;
+  if (!hitTablePoint(view, event, grab.group, _tableHit)) return;
+  _tableHit.x += grab.offsetX;
+  _tableHit.z += grab.offsetZ;
+  _tableHit.y = grab.y;
+  if (Math.hypot(_tableHit.x - grab.originX, _tableHit.z - grab.originZ) > GRAB_MAX_M) return;
+  const radius = grab.group.userData.pin?.radius || liveRadiusOf(view);
+  if (overlapsPins(_tableHit, radius, grab.group)) return;
+  grab.moved = true;
+  grab.group.position.set(_tableHit.x, grab.y, _tableHit.z);
+  grab.group.updateMatrix();
+  markLoose(grab.group);
+}
+
+function twistAngle(view) {
+  const pts = [...(view.pointers || [])]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, pt]) => pt);
+  if (pts.length < 2) return 0;
+  return Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+}
+
+function beginTwist(view) {
+  const group = view.selectedGroup;
+  if (!group || (view.pointers?.size || 0) < 2) return;
+  view.grab = null;
+  view.twist = {
+    group,
+    startYaw: group.rotation.y,
+    startAngle: twistAngle(view),
+  };
+}
+
+function updateTwist(view) {
+  const twist = view.twist;
+  if (!twist?.group || (view.pointers?.size || 0) < 2) return;
+  twist.group.rotation.set(0, twist.startYaw - (twistAngle(view) - twist.startAngle), 0);
+  twist.group.updateMatrix();
+  markLoose(twist.group);
 }
 
 function pinLiveDish(view, { silent = false } = {}) {
@@ -1714,7 +1849,7 @@ function lockDish(view, copy, hit, referenceSpace) {
   if (typeof hit.createAnchor !== "function") return;
   try {
     hit.createAnchor().then((anchor) => {
-      if (slot.cancelled || active !== view || !view.session) {
+      if (slot.cancelled || slot.manual || active !== view || !view.session) {
         anchor.delete?.();
         return;
       }
@@ -1727,6 +1862,8 @@ function lockDish(view, copy, hit, referenceSpace) {
 
 function stickGroup(group, anchor, frame, referenceSpace) {
   if (!group || !anchor || !frame || !referenceSpace) return;
+  if (group.userData.loose) return;
+  if (active?.grab?.group === group || active?.twist?.group === group) return;
   const pose = frame.getPose(anchor.anchorSpace, referenceSpace);
   if (!pose) return;
   _eyeWorld.fromArray(pose.transform.matrix);
@@ -1762,7 +1899,7 @@ function finishSession(view) {
   cancelSource(view.hitTestSource);
   view.hitTestSource = null;
   view.hitTestSourceRequested = false;
-  view.overlay?.removeEventListener("pointerdown", view.onPlacePointer);
+  unbindOverlay(view);
   if (view.overlay) view.overlay.style.pointerEvents = "";
   releaseWorld(view);
   if (view.anchorSlot) view.anchorSlot.cancelled = true;
@@ -2087,23 +2224,69 @@ function beginScan() {
     view.hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
     if (active !== view) return;
 
+    view.pointers = new Map();
     view.onPlacePointer = (event) => {
-      if (!view.session) return;
-      if (isHudEvent(event)) {
-        view.lastPointerAt = performance.now();
+      if (!view.session || event.button) return;
+      view.lastPointerAt = performance.now();
+      if (isHudControl(event)) {
         view.suppressPlace = true;
         return;
       }
-      view.lastPointerAt = performance.now();
+      if (!view.pointers) view.pointers = new Map();
+      view.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (!isHudEvent(event)) {
+        try {
+          event.currentTarget?.setPointerCapture?.(event.pointerId);
+        } catch {
+          /* El overlay sigue recibiendo el gesto. */
+        }
+      }
+      if (view.pointers.size >= 2) {
+        view.suppressPlace = true;
+        if (view.selectedGroup && !view.twist) beginTwist(view);
+        return;
+      }
+      if (isHudEvent(event)) {
+        view.suppressPlace = true;
+        return;
+      }
+      const hitGroup = dishHitAtPointer(view, event);
+      if (hitGroup) {
+        view.suppressPlace = true;
+        if (view.selectedGroup !== hitGroup) selectGroup(view, hitGroup);
+        beginGrab(view, event, hitGroup);
+        return;
+      }
       if (selectDishAtPointer(view, event)) {
         view.suppressPlace = true;
         return;
       }
       tryPlaceDish(view);
     };
+    view.onPointerMoveAR = (event) => {
+      const pt = view.pointers?.get(event.pointerId);
+      if (!pt) return;
+      pt.x = event.clientX;
+      pt.y = event.clientY;
+      if (view.twist) {
+        event.preventDefault();
+        updateTwist(view);
+      } else if (view.grab) {
+        event.preventDefault();
+        updateGrab(view, event);
+      }
+    };
+    view.onPointerUpAR = (event) => {
+      view.pointers?.delete(event.pointerId);
+      if (view.twist && (view.pointers?.size || 0) < 2) view.twist = null;
+      if (view.grab && event.pointerId === view.grab.pointerId) view.grab = null;
+    };
     view.overlay = overlay;
     if (overlay) overlay.style.pointerEvents = "auto";
     overlay?.addEventListener("pointerdown", view.onPlacePointer);
+    overlay?.addEventListener("pointermove", view.onPointerMoveAR);
+    overlay?.addEventListener("pointerup", view.onPointerUpAR);
+    overlay?.addEventListener("pointercancel", view.onPointerUpAR);
     session.addEventListener("select", (event) => {
       if (view.suppressPlace || performance.now() - view.lastPointerAt < 400) {
         view.suppressPlace = false;
