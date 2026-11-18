@@ -63,6 +63,12 @@ export const UI = {
     noAllergens: "Ninguno de los principales en la receta de referencia",
     modelTitle: "Modelo 3D",
     modelBody: (name) => `El modelo 3D de ${name} se mostrará sobre la mesa.`,
+    pickCount: "platos y bebidas",
+    pickOpen: "Abrir carta",
+    copyUrl: "Copiar",
+    copyDone: "Copiado",
+    copySelect: "Selecciona",
+    langAria: "Idioma",
   },
   br: {
     htmlLang: "pt-BR",
@@ -126,6 +132,12 @@ export const UI = {
     noAllergens: "Nenhum dos principais na receita de referência",
     modelTitle: "Modelo 3D",
     modelBody: (name) => `O modelo 3D de ${name} vai aparecer sobre a mesa.`,
+    pickCount: "pratos",
+    pickOpen: "Abrir cardápio",
+    copyUrl: "Copiar",
+    copyDone: "Copiado",
+    copySelect: "Selecionar",
+    langAria: "Idioma",
   },
 };
 
@@ -476,6 +488,7 @@ export const MENUS = {
 const TRANSLATIONS = {
   pe: {
     kitchen: "Cozinha peruana",
+    missingTitle: "Este prato não está no cardápio",
     missingBody: "O link não corresponde a nenhum prato do cardápio peruano.",
     sections: {
       entradas: "Entradas",
@@ -600,6 +613,7 @@ const TRANSLATIONS = {
   },
   br: {
     kitchen: "Cocina brasileña",
+    missingTitle: "Este plato no está en el menú",
     missingBody: "El enlace no coincide con ningún plato del menú brasileño.",
     sections: {
       "para-comecar": "Para empezar",
@@ -715,6 +729,11 @@ export function localizedKitchen(menuId, lang) {
 export function localizedMissingBody(menuId, lang) {
   if (lang === nativeLang(menuId)) return UI[menuId].missingBody;
   return TRANSLATIONS[menuId]?.missingBody || UI[menuId].missingBody;
+}
+
+export function localizedMissingTitle(menuId, lang) {
+  if (lang === nativeLang(menuId)) return UI[menuId].missingTitle;
+  return TRANSLATIONS[menuId]?.missingTitle || UI[menuId].missingTitle;
 }
 
 export function findDish(menuId, dishId) {

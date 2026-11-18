@@ -8,6 +8,7 @@ import {
   localizedSection,
   localizedKitchen,
   localizedMissingBody,
+  localizedMissingTitle,
 } from "./menus.js";
 import { createDishModel, loadDishModel } from "./models.js";
 
@@ -248,6 +249,11 @@ function setMenuLang(menu, lang) {
   }
 }
 
+function otherMenuLabel(menu, lang) {
+  if (menu === "pe") return lang === "pt" ? "Cardápio brasileiro" : "Menú brasileño";
+  return lang === "pt" ? "Cardápio peruano" : "Carta peruana";
+}
+
 function copyOf(menu) {
   const lang = menuLang(menu);
   const pack = lang === "pt" ? UI.br : UI.pe;
@@ -257,9 +263,11 @@ function copyOf(menu) {
     currency: own.currency,
     restaurant: own.restaurant,
     country: own.country,
+    language: lang === "pt" ? "Português" : "Español",
     otherHref: own.otherHref,
-    otherLabel: own.otherLabel,
+    otherLabel: otherMenuLabel(menu, lang),
     kitchen: localizedKitchen(menu, lang),
+    missingTitle: localizedMissingTitle(menu, lang),
     missingBody: localizedMissingBody(menu, lang),
     htmlLang: lang === "pt" ? "pt-BR" : "es-PE",
   };
@@ -275,79 +283,13 @@ function textSection(menu, section) {
 
 function langSwitch(menu) {
   const lang = menuLang(menu);
+  const copy = copyOf(menu);
   const options = [
     ["es", "Español"],
     ["pt", "Português"],
   ];
   return `
-    <div class="lang-switch" role="group" aria-label="${lang === "pt" ? "Idioma" : "Idioma"}">
-      ${options.map(([code, name]) => `
-        <button class="lang-btn${lang === code ? " is-on" : ""}" type="button" data-action="set-lang" data-menu="${esc(menu)}" data-lang="${code}" aria-pressed="${lang === code ? "true" : "false"}">${name}</button>
-      `).join("")}
-    </div>
-  `;
-}
-
-const LANG_KEY = "mesa-lang";
-
-function readLangs() {
-  try {
-    const data = JSON.parse(sessionStorage.getItem(LANG_KEY) || "{}");
-    return data && typeof data === "object" ? data : {};
-  } catch {
-    return {};
-  }
-}
-
-function menuLang(menu) {
-  const saved = readLangs()[menu];
-  if (saved === "es" || saved === "pt") return saved;
-  return menu === "br" ? "pt" : "es";
-}
-
-function setMenuLang(menu, lang) {
-  const all = readLangs();
-  all[menu] = lang;
-  try {
-    sessionStorage.setItem(LANG_KEY, JSON.stringify(all));
-  } catch {
-    /* El idioma sigue en memoria durante esta visita. */
-  }
-}
-
-function copyOf(menu) {
-  const lang = menuLang(menu);
-  const pack = lang === "pt" ? UI.br : UI.pe;
-  const own = UI[menu];
-  return {
-    ...pack,
-    currency: own.currency,
-    restaurant: own.restaurant,
-    country: own.country,
-    otherHref: own.otherHref,
-    otherLabel: own.otherLabel,
-    kitchen: localizedKitchen(menu, lang),
-    missingBody: localizedMissingBody(menu, lang),
-    htmlLang: lang === "pt" ? "pt-BR" : "es-PE",
-  };
-}
-
-function textDish(menu, dish) {
-  return localizedDish(menu, dish, menuLang(menu));
-}
-
-function textSection(menu, section) {
-  return localizedSection(menu, section, menuLang(menu));
-}
-
-function langSwitch(menu) {
-  const lang = menuLang(menu);
-  const options = [
-    ["es", "Español"],
-    ["pt", "Português"],
-  ];
-  return `
-    <div class="lang-switch" role="group" aria-label="${lang === "pt" ? "Idioma" : "Idioma"}">
+    <div class="lang-switch" role="group" aria-label="${esc(copy.langAria)}">
       ${options.map(([code, name]) => `
         <button class="lang-btn${lang === code ? " is-on" : ""}" type="button" data-action="set-lang" data-menu="${esc(menu)}" data-lang="${code}" aria-pressed="${lang === code ? "true" : "false"}">${name}</button>
       `).join("")}
@@ -369,13 +311,12 @@ function render() {
   const shown = found
     ? { dish: textDish(menu, found.dish), section: textSection(menu, found.section) }
     : null;
-  const shown = found
-    ? { dish: textDish(menu, found.dish), section: textSection(menu, found.section) }
-    : null;
   const keep = Boolean(active?.session && world.pinned.length && menu && world.menu === menu);
   if (keep && renderKeptAR(menu, plato, pedido, shown)) return;
 
-  const sameDish = found && active && active.menu === menu && active.dishId === found.dish.id && app.querySelector(".viewer");
+  const uiLang = menu ? menuLang(menu) : null;
+  const sameDish = found && active && active.menu === menu && active.dishId === found.dish.id
+    && app.querySelector(".viewer") && active.uiLang === uiLang;
   if (sameDish) return;
 
   stopViewer();
@@ -414,30 +355,31 @@ function landing() {
 }
 
 function pickCard(menu) {
-  const copy = UI[menu];
+  const copy = copyOf(menu);
   const names = MENUS[menu].sections
     .flatMap((section) => section.dishes)
     .slice(0, 3)
-    .map((dish) => dish.name)
+    .map((dish) => textDish(menu, dish).name)
     .join(" · ");
   return `
     <a class="sheet pick" data-nav data-accent="${menu}" href="${esc(appHref(menu))}">
       <p class="pick-kicker">${esc(copy.language)}</p>
       <h2>${esc(copy.carta)}</h2>
-      <p>${esc(copy.kitchen)} · ${dishCount(menu)} ${menu === "pe" ? "platos y bebidas" : "pratos"}</p>
+      <p>${esc(copy.kitchen)} · ${dishCount(menu)} ${esc(copy.pickCount)}</p>
       <p class="pick-names">${esc(names)}</p>
-      <span class="pick-go">${menu === "pe" ? "Abrir carta" : "Abrir cardápio"}</span>
+      <span class="pick-go">${esc(copy.pickOpen)}</span>
     </a>
   `;
 }
 
 function urlRow(menu, label) {
+  const copy = copyOf(menu);
   const url = slugUrl(menu);
   return `
     <div class="url-row">
       <strong>${esc(label)}</strong>
       <code>${esc(url)}</code>
-      <button class="copy" type="button" data-action="copy-slug" data-code="${menu}" data-label="Copiar">Copiar</button>
+      <button class="copy" type="button" data-action="copy-slug" data-code="${menu}" data-label="${esc(copy.copyUrl)}" data-done="${esc(copy.copyDone)}" data-select="${esc(copy.copySelect)}">${esc(copy.copyUrl)}</button>
     </div>
   `;
 }
@@ -520,6 +462,7 @@ function pedidoView(menu) {
           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
           ${esc(copy.back)}
         </a>
+        ${langSwitch(menu)}
         <p class="eyebrow">MESA ${esc(tableLabel())}</p>
         <h1 class="dish-title">${esc(copy.orderTitle)}</h1>
         ${empty
@@ -548,6 +491,7 @@ function pedidoPlacedView(menu) {
           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
           ${esc(copy.back)}
         </a>
+        ${langSwitch(menu)}
         <h1 class="dish-title">${esc(copy.orderPlacedTitle)}</h1>
         <p class="desc">${esc(copy.orderPlacedBody)}</p>
       </article>
@@ -574,6 +518,7 @@ function viewerMarkup(menu, section, dish) {
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor" stroke-width="1.6"></path></svg>
         ${esc(copy.back)}
       </a>
+      <div class="viewer-lang">${langSwitch(menu)}</div>
       <button class="viewer-order" type="button" data-action="view-order" data-menu="${esc(menu)}">
         <span>${esc(copy.viewOrder)}</span>
         ${cartItemCount(menu) ? `<span class="viewer-order-badge" aria-hidden="true">${cartItemCount(menu)}</span>` : ""}
@@ -617,6 +562,7 @@ function missing(menu) {
   return `
     <div class="screen">
       <article class="sheet sheet-pad" data-accent="${menu}">
+        ${langSwitch(menu)}
         <h1 class="dish-title">${esc(copy.missingTitle)}</h1>
         <p class="desc">${esc(copy.missingBody)}</p>
         <p class="desc"><a data-nav href="${esc(appHref(menu))}">${esc(copy.back)}</a></p>
@@ -726,6 +672,7 @@ function mountViewer(menu, dish) {
   const view = setupThree(canvas, dish.id, token);
   view.menu = menu;
   view.dishId = dish.id;
+  view.uiLang = menuLang(menu);
   view.liveToken = 0;
   active = view;
   bindFactsScroller();
@@ -1977,10 +1924,12 @@ function bindFactsScroller() {
 async function copySlug(button) {
   const url = slugUrl(button.dataset.code);
   const label = button.dataset.label || "Copiar";
+  const done = button.dataset.done || "Copiado";
+  const select = button.dataset.select || "Selecciona";
   const code = button.parentElement?.querySelector("code");
   try {
     await navigator.clipboard.writeText(url);
-    button.textContent = "Copiado";
+    button.textContent = done;
   } catch {
     if (code) {
       const range = document.createRange();
@@ -1989,7 +1938,7 @@ async function copySlug(button) {
       selection.removeAllRanges();
       selection.addRange(range);
     }
-    button.textContent = "Selecciona";
+    button.textContent = select;
   }
   window.setTimeout(() => {
     button.textContent = label;
