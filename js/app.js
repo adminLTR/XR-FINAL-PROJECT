@@ -22,8 +22,8 @@ const DISH_SCALE_PREVIEW = 1;
 /** Tamaño anclado en la mesa durante AR. */
 const DISH_SCALE_AR = 0.26;
 const DISH_SCALE_SHADOW_REF = DISH_SCALE_PREVIEW;
-const VIEWER_LIGHT_STUDIO = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
-const VIEWER_LIGHT_AR = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
+const VIEWER_LIGHT_STUDIO = { hemi: 2.2, key: 2.4, fill: 1.2, rim: 0.7, ambient: 0.45, bounce: 0.55, exposure: 1.0 };
+const VIEWER_LIGHT_AR = { hemi: 1.6, key: 1.7, fill: 0.8, rim: 0.4, ambient: 0.28, bounce: 0, exposure: 0.95 };
 /** Distancia extra para que la mesa no se coma el plato; una mano sí lo tapa. */
 const OCCLUSION_BIAS_M = 0.12;
 
@@ -1266,8 +1266,8 @@ function applyViewerLighting(view, studio) {
     ambient.visible = preset.ambient > 0;
   }
   if (bounce) {
-    bounce.intensity = studio ? 1.8 : 0;
-    bounce.visible = studio;
+    bounce.intensity = preset.bounce;
+    bounce.visible = preset.bounce > 0;
   }
   view.renderer.toneMappingExposure = preset.exposure;
 }
