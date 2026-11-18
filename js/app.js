@@ -10,7 +10,7 @@ import {
   localizedMissingBody,
   localizedMissingTitle,
 } from "./menus.js";
-import { createDishModel, loadDishModel } from "./models.js";
+import { loadDishModel, prefetchDishModels, isDishModelReady } from "./models.js";
 
 const app = document.querySelector("#app");
 
@@ -836,9 +836,24 @@ function togglePicked(id) {
   if (!pickedIds.length) pickMode = false;
 }
 
+function prefetchQueueModels() {
+  prefetchDishModels(placeQueue.map((item) => item.id));
+}
+
+function queueScanHint(menu, dishId) {
+  const copy = copyOf(menu);
+  const rest = placeQueue.slice(1);
+  const loading = isDishModelReady(dishId) ? copy.scanHint : copy.modelLoading;
+  if (!rest.length) return loading;
+  const found = findDish(rest[0].menu, rest[0].id);
+  const name = found ? textDish(rest[0].menu, found.dish).name : "";
+  return `${loading} ${copy.nextInQueue.replace("{name}", name)}`;
+}
+
 function startPlacement() {
   const view = active;
   if (!view || !placeQueue.length) return;
+  prefetchQueueModels();
   queryAR().then((supported) => {
     if (active !== view || !placeQueue.length) return;
     view.arReady = supported;
@@ -860,23 +875,15 @@ function beginQueuePlacement() {
     showMenuLayer();
     return;
   }
+  prefetchQueueModels();
   showPlacingLayer();
-  const copy = copyOf(next.menu);
   if (view.liveDishId === next.id && view.model && view.placed && !view.placed.userData.pin) {
     view.suspendPlace = false;
     view.liveReady = true;
-    setViewerHint(copy.scanHint);
+    setViewerHint(queueScanHint(next.menu, next.id));
     return;
   }
   mountLiveDish(view, next.menu, next.id);
-  const rest = placeQueue.slice(1);
-  if (rest.length) {
-    const found = findDish(rest[0].menu, rest[0].id);
-    const name = found ? textDish(rest[0].menu, found.dish).name : "";
-    setViewerHint(`${copy.scanHint} ${copy.nextInQueue.replace("{name}", name)}`);
-  } else {
-    setViewerHint(copy.scanHint);
-  }
 }
 
 function mountShell(menu) {
@@ -1442,11 +1449,18 @@ function retireUnpinnedLive(view) {
   view.shadow = null;
 }
 
+function skipFailedDish(view, menu) {
+  showViewerAlert(copyOf(menu).modelFailed);
+  showToast(copyOf(menu).modelFailed);
+  placeQueue.shift();
+  if (placeQueue.length) beginQueuePlacement();
+  else showMenuLayer();
+}
+
 function mountLiveDish(view, menu, dishId) {
   retireUnpinnedLive(view);
   const token = (view.liveToken || 0) + 1;
   view.liveToken = token;
-  const model = createDishModel(dishId);
   const shadow = new THREE.Mesh(
     new THREE.CircleGeometry(0.48, 40),
     new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false })
@@ -1455,14 +1469,13 @@ function mountLiveDish(view, menu, dishId) {
   shadow.position.y = 0.01;
   shadow.name = "shadow";
   const placed = new THREE.Group();
-  placed.add(model);
   placed.add(shadow);
   placed.userData.menu = menu;
   placed.userData.dishId = dishId;
   placed.visible = false;
   view.scene.add(placed);
   view.placed = placed;
-  view.model = model;
+  view.model = null;
   view.shadow = shadow;
   view.menu = menu;
   view.dishId = dishId;
@@ -1479,17 +1492,20 @@ function mountLiveDish(view, menu, dishId) {
   view.blockedSurface = false;
   view.blockedOverlap = false;
   view.overlapSeen = false;
-  setDishScale(view, DISH_SCALE_AR);
-  view.liveRadius = worldFootprint(placed);
+  view.liveRadius = 0.14;
+  setViewerHint(queueScanHint(menu, dishId));
   loadDishModel(dishId).then((loaded) => {
-    if (view.liveToken !== token || view.placed !== placed || loaded.userData.source !== "glb") return;
-    const spin = model.rotation.y;
-    placed.remove(model);
-    loaded.rotation.y = spin;
+    if (view.liveToken !== token || view.placed !== placed) return;
     placed.add(loaded);
     view.model = loaded;
     setDishScale(view, DISH_SCALE_AR);
     view.liveRadius = worldFootprint(placed);
+    if (!view.dishPlaced) {
+      setViewerHint(view.surfaceValid ? copyOf(menu).placeHint : queueScanHint(menu, dishId));
+    }
+  }).catch(() => {
+    if (view.liveToken !== token || view.placed !== placed) return;
+    skipFailedDish(view, menu);
   });
 }
 
@@ -1561,7 +1577,11 @@ function stickDish(view, frame) {
 }
 
 function tryPlaceDish(view) {
-  if (!view.session || !view.liveReady || view.suspendPlace || !view.model || view.dishPlaced || view.placing) return;
+  if (!view.session || !view.liveReady || view.suspendPlace || view.dishPlaced || view.placing) return;
+  if (!view.model) {
+    showViewerAlert(copyOf(view.menu).modelLoading);
+    return;
+  }
   view.placeRequested = true;
 }
 
@@ -1636,7 +1656,9 @@ function updateHitTest(view, copy, frame) {
     return null;
   }
   if (view.overlapSeen) view.overlapSeen = false;
-  if (valid && !view.surfaceSeen) {
+  if (!view.model) {
+    setViewerHint(copy.modelLoading);
+  } else if (valid && !view.surfaceSeen) {
     view.surfaceSeen = true;
     setViewerHint(copy.placeHint);
   } else if (!valid && view.surfaceSeen) {
@@ -1804,6 +1826,7 @@ function beginScan() {
   const hud = app.querySelector(".xr-hud");
   if (hud) hud.hidden = false;
   view.starting = true;
+  prefetchQueueModels();
   if (view.model) view.model.rotation.y = 0;
   let pending;
   try {

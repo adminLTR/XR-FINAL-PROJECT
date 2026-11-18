@@ -4,6 +4,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 const MODELS_DIR = new URL("../models/", import.meta.url);
 const gltfLoader = new GLTFLoader();
 const glbCache = new Map();
+const glbPending = new Map();
 
 /** Nombre de archivo: id del plato con guiones → guiones bajos (ej. `inca-kola` → `inca_kola.glb`). */
 export function dishGlbFileName(dishId) {
@@ -544,18 +545,46 @@ function buildGlbRoot(gltfScene) {
   return root;
 }
 
-/** Carga `models/<id_con_underscores>.glb` o devuelve el modelo procedural actual. */
-export async function loadDishModel(dishId) {
+function ensureDishModel(dishId) {
   const url = dishGlbUrl(dishId);
-  if (glbCache.has(url)) {
-    return glbCache.get(url).clone(true);
+  if (glbCache.has(url)) return Promise.resolve(glbCache.get(url));
+  if (glbPending.has(url)) return glbPending.get(url);
+  const pending = gltfLoader.loadAsync(url)
+    .then((gltf) => {
+      const root = buildGlbRoot(gltf.scene);
+      glbCache.set(url, root);
+      return root;
+    })
+    .finally(() => {
+      glbPending.delete(url);
+    });
+  glbPending.set(url, pending);
+  return pending;
+}
+
+export function isDishModelReady(dishId) {
+  return glbCache.has(dishGlbUrl(dishId));
+}
+
+/** Descarga solo los GLB indicados, en orden, para que el primero tenga prioridad de red. */
+export function prefetchDishModels(dishIds) {
+  const unique = [];
+  const seen = new Set();
+  for (const id of dishIds) {
+    const key = String(id);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(key);
   }
-  try {
-    const gltf = await gltfLoader.loadAsync(url);
-    const root = buildGlbRoot(gltf.scene);
-    glbCache.set(url, root);
-    return root.clone(true);
-  } catch {
-    return createDishModel(dishId);
+  let chain = Promise.resolve();
+  for (const id of unique) {
+    chain = chain.then(() => ensureDishModel(id).catch(() => null));
   }
+  return chain;
+}
+
+/** Carga `models/<id_con_underscores>.glb`. No usa modelos procedurales. */
+export async function loadDishModel(dishId) {
+  const root = await ensureDishModel(dishId);
+  return root.clone(true);
 }
