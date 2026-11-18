@@ -22,7 +22,7 @@ const DISH_SCALE_PREVIEW = 1;
 /** Tamaño anclado en la mesa durante AR. */
 const DISH_SCALE_AR = 0.26;
 const DISH_SCALE_SHADOW_REF = DISH_SCALE_PREVIEW;
-const VIEWER_LIGHT_STUDIO = { hemi: 2.2, key: 2.4, fill: 1.2, rim: 0.7, ambient: 0.45, bounce: 0.55, exposure: 1.0 };
+const VIEWER_LIGHT_STUDIO = { hemi: 0.7, key: 0.75, fill: 0.32, rim: 0.15, ambient: 0.12, bounce: 0, exposure: 0.72 };
 const VIEWER_LIGHT_AR = { hemi: 0.7, key: 0.75, fill: 0.32, rim: 0.15, ambient: 0.12, bounce: 0, exposure: 0.72 };
 /** Distancia extra para que la mesa no se coma el plato; una mano sí lo tapa. */
 const OCCLUSION_BIAS_M = 0.12;
