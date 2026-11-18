@@ -20,11 +20,11 @@ const RETICLE_BLOCK = 0xe05a3c;
 /** Vista previa (antes de escanear). */
 const DISH_SCALE_PREVIEW = 1;
 /** Tamaño anclado en la mesa durante AR. */
-const DISH_SCALE_AR = 0.12;
+const DISH_SCALE_AR = 0.26;
 const DISH_SCALE_SHADOW_REF = DISH_SCALE_PREVIEW;
 const VIEWER_LIGHT_STUDIO = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
 const VIEWER_LIGHT_AR = { hemi: 5.4, key: 5.8, fill: 3.2, rim: 2.1, ambient: 1.4, exposure: 1.45 };
-const OCCLUSION_BIAS_M = 0.012;
+const OCCLUSION_BIAS_M = 0.02;
 
 const _hitPos = new THREE.Vector3();
 const _hitQuat = new THREE.Quaternion();
@@ -53,6 +53,7 @@ const world = {
 };
 /** Cola de platos a colocar en AR, en orden de selección. */
 const placeQueue = [];
+let queueSeq = 0;
 let pickMode = false;
 let pickedIds = [];
 let holdTimer = 0;
@@ -311,6 +312,26 @@ function resetPicks() {
   holdFired = false;
 }
 
+function makeQueueItem(menu, id) {
+  queueSeq += 1;
+  return { menu, id, token: queueSeq };
+}
+
+function setPlaceQueue(items) {
+  placeQueue.length = 0;
+  for (const item of items) placeQueue.push(item);
+}
+
+function dequeueToken(token) {
+  const idx = placeQueue.findIndex((item) => item.token === token);
+  if (idx >= 0) placeQueue.splice(idx, 1);
+}
+
+function dequeueCurrent(view) {
+  if (view?.queueItem) dequeueToken(view.queueItem.token);
+  if (view) view.queueItem = null;
+}
+
 function placeQueueLabel(copy) {
   const n = pickedIds.length;
   if (n > 1) return copy.placeQueueN.replace("{n}", String(n));
@@ -362,7 +383,7 @@ function render() {
   window.scrollTo(0, 0);
 
   if (state.found && !pedido) {
-    placeQueue.push({ menu, id: state.found.dish.id });
+    setPlaceQueue([makeQueueItem(menu, state.found.dish.id)]);
     history.replaceState({}, "", appHref(menu));
   }
 }
@@ -688,6 +709,8 @@ function disposeView(view) {
   if (view.overlay) view.overlay.style.pointerEvents = "";
   view.occluder?.geometry.dispose();
   view.occluder?.material.dispose();
+  view.depthQuad?.userData.depthTexture2D?.dispose();
+  view.depthQuad?.userData.depthTextureArray?.dispose();
   view.depthQuad?.geometry.dispose();
   view.depthQuad?.material.dispose();
   view.selectRing?.geometry.dispose();
@@ -877,6 +900,7 @@ function beginQueuePlacement() {
   }
   prefetchQueueModels();
   showPlacingLayer();
+  view.queueItem = next;
   if (view.liveDishId === next.id && view.model && view.placed && !view.placed.userData.pin) {
     view.suspendPlace = false;
     view.liveReady = true;
@@ -972,6 +996,15 @@ function createDepthQuad() {
   depthTexture2D.wrapT = THREE.ClampToEdgeWrapping;
   if (THREE.NoColorSpace) depthTexture2D.colorSpace = THREE.NoColorSpace;
   depthTexture2D.needsUpdate = true;
+  const depthTextureArray = new THREE.DataArrayTexture(new Float32Array([0]), 1, 1, 1);
+  depthTextureArray.generateMipmaps = false;
+  depthTextureArray.flipY = false;
+  depthTextureArray.magFilter = THREE.NearestFilter;
+  depthTextureArray.minFilter = THREE.NearestFilter;
+  depthTextureArray.wrapS = THREE.ClampToEdgeWrapping;
+  depthTextureArray.wrapT = THREE.ClampToEdgeWrapping;
+  if (THREE.NoColorSpace) depthTextureArray.colorSpace = THREE.NoColorSpace;
+  depthTextureArray.needsUpdate = true;
   const material = new THREE.ShaderMaterial({
     uniforms: {
       uDepth2D: { value: depthTexture2D },
@@ -982,6 +1015,9 @@ function createDepthQuad() {
       uViewport: { value: new THREE.Vector4(0, 0, 1, 1) },
       uProjZ: { value: new THREE.Vector4(0, 0, -1, 0) },
       uBias: { value: OCCLUSION_BIAS_M },
+      uDepthArray: { value: depthTextureArray },
+      uUseArray: { value: 0 },
+      uLayer: { value: 0 },
     },
     glslVersion: THREE.GLSL3,
     vertexShader: `
@@ -993,6 +1029,9 @@ function createDepthQuad() {
     fragmentShader: `
       precision highp float;
       uniform sampler2D uDepth2D;
+      uniform sampler2DArray uDepthArray;
+      uniform int uUseArray;
+      uniform float uLayer;
       uniform int uMetersInRed;
       uniform float uRawToMeters;
       uniform float uPack;
@@ -1008,12 +1047,14 @@ function createDepthQuad() {
         );
         vec2 depthUv = (uViewToDepth * vec4(normView, 0.0, 1.0)).xy;
         if (depthUv.x < 0.0 || depthUv.y < 0.0 || depthUv.x > 1.0 || depthUv.y > 1.0) discard;
-        vec4 packed = texture(uDepth2D, depthUv);
+        vec4 packed = uUseArray == 1
+          ? texture(uDepthArray, vec3(depthUv, uLayer))
+          : texture(uDepth2D, depthUv);
         float meters = uMetersInRed == 1
           ? packed.r
           : (uPack > 0.5 ? dot(packed.ra, vec2(65280.0, 255.0)) : packed.r) * uRawToMeters;
-        if (meters <= 0.02 || meters > 8.0) discard;
-        meters += uBias;
+        if (meters <= 0.04 || meters > 8.0) discard;
+        meters = max(meters - uBias, 0.04);
         float viewZ = -meters;
         float clipZ = uProjZ.x * viewZ + uProjZ.y;
         float clipW = uProjZ.z * viewZ + uProjZ.w;
@@ -1030,10 +1071,11 @@ function createDepthQuad() {
   });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;
-  mesh.renderOrder = -1000;
+  mesh.renderOrder = -1e6;
   mesh.visible = false;
   mesh.name = "depthQuad";
   mesh.userData.depthTexture2D = depthTexture2D;
+  mesh.userData.depthTextureArray = depthTextureArray;
   return mesh;
 }
 
@@ -1047,6 +1089,10 @@ function keepDishDepth(root) {
     for (const mat of list) {
       if (!mat) continue;
       mat.depthTest = true;
+      mat.depthFunc = THREE.LessEqualDepth;
+      mat.polygonOffset = true;
+      mat.polygonOffsetFactor = 1;
+      mat.polygonOffsetUnits = 1;
       if (!mat.transparent && !mat.alphaTest) mat.depthWrite = true;
     }
   });
@@ -1166,28 +1212,28 @@ function placeReticle(view, matrix, valid) {
 }
 
 function worldFootprint(group) {
-  if (!group) return 0.14;
+  if (!group) return 0.22;
   const ring = group.children.find((child) => child.name === "selectRing");
   if (ring) group.remove(ring);
   _box.setFromObject(group);
   if (ring) group.add(ring);
-  if (_box.isEmpty()) return 0.14;
+  if (_box.isEmpty()) return 0.22;
   _box.getSize(_boxSize);
-  return Math.max(_boxSize.x, _boxSize.z, 0.08) / 2;
+  return Math.max(_boxSize.x, _boxSize.z, 0.12) / 2;
 }
 
 function footprintAtARScale(view) {
-  if (!view.model) return 0.14;
+  if (!view.model) return 0.22;
   const scale = view.model.scale.x || 1;
   _box.setFromObject(view.model);
-  if (_box.isEmpty()) return 0.14;
+  if (_box.isEmpty()) return 0.22;
   _box.getSize(_boxSize);
   const factor = DISH_SCALE_AR / scale;
   return Math.max(_boxSize.x, _boxSize.z, 0.08) * factor / 2;
 }
 
 function liveRadiusOf(view) {
-  return view.liveRadius > 0 ? view.liveRadius : 0.14;
+  return view.liveRadius > 0 ? view.liveRadius : 0.22;
 }
 
 function overlapsPins(point, radius) {
@@ -1274,7 +1320,7 @@ function selectGroup(view, group, hint) {
   if (several) {
     const ring = ensureSelectRing(view);
     ring.removeFromParent();
-    const radius = pin?.radius || view.liveRadius || 0.14;
+    const radius = pin?.radius || view.liveRadius || 0.22;
     ring.scale.setScalar((Math.max(radius, 0.05) * 1.12) / 0.15);
     group.add(ring);
   } else {
@@ -1398,8 +1444,10 @@ function pinLiveDish(view, { silent = false } = {}) {
 }
 
 function commitPlacedDish(view) {
+  const item = view.queueItem;
   if (!pinLiveDish(view, { silent: true })) return;
-  placeQueue.shift();
+  if (item) dequeueToken(item.token);
+  view.queueItem = null;
   showToast(copyOf(view.menu).pinnedToast);
   if (placeQueue.length) beginQueuePlacement();
   else showMenuLayer();
@@ -1452,7 +1500,7 @@ function retireUnpinnedLive(view) {
 function skipFailedDish(view, menu) {
   showViewerAlert(copyOf(menu).modelFailed);
   showToast(copyOf(menu).modelFailed);
-  placeQueue.shift();
+  dequeueCurrent(view);
   if (placeQueue.length) beginQueuePlacement();
   else showMenuLayer();
 }
@@ -1492,7 +1540,7 @@ function mountLiveDish(view, menu, dishId) {
   view.blockedSurface = false;
   view.blockedOverlap = false;
   view.overlapSeen = false;
-  view.liveRadius = 0.14;
+  view.liveRadius = 0.22;
   setViewerHint(queueScanHint(menu, dishId));
   loadDishModel(dishId).then((loaded) => {
     if (view.liveToken !== token || view.placed !== placed) return;
@@ -1527,29 +1575,19 @@ function lockDish(view, copy, hit, referenceSpace) {
   const slot = { anchor: null, cancelled: false };
   view.anchorSlot = slot;
   view.anchor = null;
-  const done = () => {
-    view.placing = false;
-    if (slot.cancelled || active !== view || !view.session) return;
-    commitPlacedDish(view);
-  };
-  if (typeof hit.createAnchor === "function") {
-    try {
-      hit.createAnchor().then((anchor) => {
-        if (slot.cancelled || active !== view || !view.session) {
-          anchor.delete?.();
-          done();
-          return;
-        }
-        slot.anchor = anchor;
-        if (view.anchorSlot === slot) view.anchor = anchor;
-        done();
-      }).catch(() => done());
-    } catch {
-      done();
-    }
-    return;
+  commitPlacedDish(view);
+  if (typeof hit.createAnchor !== "function") return;
+  try {
+    hit.createAnchor().then((anchor) => {
+      if (slot.cancelled || active !== view || !view.session) {
+        anchor.delete?.();
+        return;
+      }
+      slot.anchor = anchor;
+    }).catch(() => {});
+  } catch {
+    /* El plato ya quedó anclado en espacio local. */
   }
-  done();
 }
 
 function stickGroup(group, anchor, frame, referenceSpace) {
@@ -1765,16 +1803,20 @@ function prepareOcclusion(view, frame) {
       depth = null;
     }
     if (depth && uploadCpuDepth(view, depth)) {
+      view.depthQuad.material.uniforms.uUseArray.value = 0;
       view.depthQuad.visible = true;
       return;
     }
   }
 
   const gpu = gpuDepthInfo(view, xrView);
-  if (gpu?.texture && gpu.textureType !== "texture-array") {
+  if (gpu?.texture) {
     view.gpuDepth = gpu;
+    view.occlusionLayer = Math.max(0, pose.views.indexOf(xrView));
     view.depthQuad.userData.externalDepth = gpu;
     view.depthQuad.material.uniforms.uMetersInRed.value = 0;
+    view.depthQuad.material.uniforms.uUseArray.value = gpu.textureType === "texture-array" ? 1 : 0;
+    view.depthQuad.material.uniforms.uLayer.value = view.occlusionLayer;
     const mapping = gpu.normDepthBufferFromNormView?.matrix;
     const uniform = view.depthQuad.material.uniforms.uViewToDepth.value;
     if (mapping) uniform.fromArray(mapping);
@@ -2024,10 +2066,15 @@ function setupThree(canvas) {
     const proj = view.occlusionProj;
     if (proj) uniforms.uProjZ.value.set(proj[10], proj[14], proj[11], proj[15]);
     const info = view.gpuDepth;
-    if (!info?.texture || info.textureType === "texture-array") return;
-    const props = activeRenderer.properties.get(depthTexture2D);
+    if (!info?.texture) return;
+    const isArray = info.textureType === "texture-array";
+    const target = isArray ? depthQuad.userData.depthTextureArray : depthTexture2D;
+    if (!target) return;
+    const props = activeRenderer.properties.get(target);
     props.__webglTexture = info.texture;
-    props.__version = depthTexture2D.version;
+    props.__version = target.version;
+    uniforms.uUseArray.value = isArray ? 1 : 0;
+    uniforms.uLayer.value = view.occlusionLayer || 0;
     uniforms.uMetersInRed.value = 0;
     uniforms.uRawToMeters.value = info.rawValueToMeters > 0 ? info.rawValueToMeters : 1;
     uniforms.uPack.value = view.session?.depthDataFormat === "luminance-alpha" || view.session?.depthDataFormat === "unsigned-short" ? 1 : 0;
@@ -2153,7 +2200,7 @@ function onClick(event) {
         showDishInfo(menu, id);
         return;
       }
-      placeQueue.push({ menu, id });
+      setPlaceQueue([makeQueueItem(menu, id)]);
       startPlacement();
     });
     return;
@@ -2180,7 +2227,7 @@ function onClick(event) {
   }
   if (action?.dataset.action === "place-queue") {
     const menu = action.dataset.menu;
-    pickedIds.forEach((id) => placeQueue.push({ menu, id }));
+    setPlaceQueue(pickedIds.map((id) => makeQueueItem(menu, id)));
     pickMode = false;
     pickedIds = [];
     startPlacement();
