@@ -641,6 +641,32 @@ button { cursor: pointer; }
   color: var(--muted);
 }
 
+.lang-switch {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin: 16px 0 2px;
+}
+
+.lang-btn {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  border-radius: 999px;
+  background: rgba(255, 252, 246, 0.55);
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.lang-btn.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff8ee;
+}
+
+.lang-btn:hover { filter: brightness(1.06); }
+
 .hint {
   margin: 12px auto 0;
   max-width: 32ch;

@@ -1,5 +1,14 @@
 import * as THREE from "three";
-import { MENUS, UI, findDish, dishCount } from "./menus.js";
+import {
+  MENUS,
+  UI,
+  findDish,
+  dishCount,
+  localizedDish,
+  localizedSection,
+  localizedKitchen,
+  localizedMissingBody,
+} from "./menus.js";
 import { createDishModel, loadDishModel } from "./models.js";
 
 const app = document.querySelector("#app");
@@ -198,7 +207,7 @@ function addedLabel(copy, qty) {
 function paintAddButton(button, qty) {
   const count = button.querySelector(".viewer-add-count");
   if (!count) return;
-  const copy = UI[button.dataset.menu];
+  const copy = copyOf(button.dataset.menu);
   count.hidden = qty < 1;
   count.textContent = qty > 0 ? String(qty) : "";
   button.classList.toggle("is-added", qty > 0);
@@ -212,9 +221,143 @@ function tableLabel() {
   return /^\d+$/.test(clean) ? clean.padStart(2, "0") : clean;
 }
 
+const LANG_KEY = "mesa-lang";
+
+function readLangs() {
+  try {
+    const data = JSON.parse(sessionStorage.getItem(LANG_KEY) || "{}");
+    return data && typeof data === "object" ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function menuLang(menu) {
+  const saved = readLangs()[menu];
+  if (saved === "es" || saved === "pt") return saved;
+  return menu === "br" ? "pt" : "es";
+}
+
+function setMenuLang(menu, lang) {
+  const all = readLangs();
+  all[menu] = lang;
+  try {
+    sessionStorage.setItem(LANG_KEY, JSON.stringify(all));
+  } catch {
+    /* El idioma sigue en memoria durante esta visita. */
+  }
+}
+
+function copyOf(menu) {
+  const lang = menuLang(menu);
+  const pack = lang === "pt" ? UI.br : UI.pe;
+  const own = UI[menu];
+  return {
+    ...pack,
+    currency: own.currency,
+    restaurant: own.restaurant,
+    country: own.country,
+    otherHref: own.otherHref,
+    otherLabel: own.otherLabel,
+    kitchen: localizedKitchen(menu, lang),
+    missingBody: localizedMissingBody(menu, lang),
+    htmlLang: lang === "pt" ? "pt-BR" : "es-PE",
+  };
+}
+
+function textDish(menu, dish) {
+  return localizedDish(menu, dish, menuLang(menu));
+}
+
+function textSection(menu, section) {
+  return localizedSection(menu, section, menuLang(menu));
+}
+
+function langSwitch(menu) {
+  const lang = menuLang(menu);
+  const options = [
+    ["es", "Español"],
+    ["pt", "Português"],
+  ];
+  return `
+    <div class="lang-switch" role="group" aria-label="${lang === "pt" ? "Idioma" : "Idioma"}">
+      ${options.map(([code, name]) => `
+        <button class="lang-btn${lang === code ? " is-on" : ""}" type="button" data-action="set-lang" data-menu="${esc(menu)}" data-lang="${code}" aria-pressed="${lang === code ? "true" : "false"}">${name}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
+const LANG_KEY = "mesa-lang";
+
+function readLangs() {
+  try {
+    const data = JSON.parse(sessionStorage.getItem(LANG_KEY) || "{}");
+    return data && typeof data === "object" ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function menuLang(menu) {
+  const saved = readLangs()[menu];
+  if (saved === "es" || saved === "pt") return saved;
+  return menu === "br" ? "pt" : "es";
+}
+
+function setMenuLang(menu, lang) {
+  const all = readLangs();
+  all[menu] = lang;
+  try {
+    sessionStorage.setItem(LANG_KEY, JSON.stringify(all));
+  } catch {
+    /* El idioma sigue en memoria durante esta visita. */
+  }
+}
+
+function copyOf(menu) {
+  const lang = menuLang(menu);
+  const pack = lang === "pt" ? UI.br : UI.pe;
+  const own = UI[menu];
+  return {
+    ...pack,
+    currency: own.currency,
+    restaurant: own.restaurant,
+    country: own.country,
+    otherHref: own.otherHref,
+    otherLabel: own.otherLabel,
+    kitchen: localizedKitchen(menu, lang),
+    missingBody: localizedMissingBody(menu, lang),
+    htmlLang: lang === "pt" ? "pt-BR" : "es-PE",
+  };
+}
+
+function textDish(menu, dish) {
+  return localizedDish(menu, dish, menuLang(menu));
+}
+
+function textSection(menu, section) {
+  return localizedSection(menu, section, menuLang(menu));
+}
+
+function langSwitch(menu) {
+  const lang = menuLang(menu);
+  const options = [
+    ["es", "Español"],
+    ["pt", "Português"],
+  ];
+  return `
+    <div class="lang-switch" role="group" aria-label="${lang === "pt" ? "Idioma" : "Idioma"}">
+      ${options.map(([code, name]) => `
+        <button class="lang-btn${lang === code ? " is-on" : ""}" type="button" data-action="set-lang" data-menu="${esc(menu)}" data-lang="${code}" aria-pressed="${lang === code ? "true" : "false"}">${name}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
 function render() {
   const { menu, plato, pedido } = route();
-  const copy = menu ? UI[menu] : null;
+  const copy = menu ? copyOf(menu) : null;
   document.documentElement.lang = copy ? copy.htmlLang : "es";
   document.title = copy
     ? pedido
@@ -223,8 +366,14 @@ function render() {
     : "MESA — Carta aumentada";
 
   const found = menu && plato ? findDish(menu, plato) : null;
+  const shown = found
+    ? { dish: textDish(menu, found.dish), section: textSection(menu, found.section) }
+    : null;
+  const shown = found
+    ? { dish: textDish(menu, found.dish), section: textSection(menu, found.section) }
+    : null;
   const keep = Boolean(active?.session && world.pinned.length && menu && world.menu === menu);
-  if (keep && renderKeptAR(menu, plato, pedido, found)) return;
+  if (keep && renderKeptAR(menu, plato, pedido, shown)) return;
 
   const sameDish = found && active && active.menu === menu && active.dishId === found.dish.id && app.querySelector(".viewer");
   if (sameDish) return;
@@ -234,11 +383,11 @@ function render() {
   if (!menu) app.innerHTML = landing();
   else if (pedido) app.innerHTML = pedidoView(menu);
   else if (plato && !found) app.innerHTML = missing(menu);
-  else if (found) app.innerHTML = viewerMarkup(menu, found.section, found.dish);
+  else if (found) app.innerHTML = viewerMarkup(menu, shown.section, shown.dish);
   else app.innerHTML = carta(menu);
 
   window.scrollTo(0, 0);
-  if (found) mountViewer(menu, found.dish);
+  if (found) mountViewer(menu, shown.dish);
 }
 
 function landing() {
@@ -294,12 +443,16 @@ function urlRow(menu, label) {
 }
 
 function carta(menu) {
-  const copy = UI[menu];
-  const sections = MENUS[menu].sections.map((section) => `
+  const copy = copyOf(menu);
+  const sections = MENUS[menu].sections.map((section) => {
+    const title = textSection(menu, section).title;
+    return `
     <section class="menu-section" aria-labelledby="sec-${section.id}">
-      <h2 class="section-label" id="sec-${section.id}">${esc(section.title)}</h2>
+      <h2 class="section-label" id="sec-${section.id}">${esc(title)}</h2>
       <ul class="dishes">
-        ${section.dishes.map((dish) => `
+        ${section.dishes.map((item) => {
+          const dish = textDish(menu, item);
+          return `
           <li>
             <a class="dish" data-nav href="${esc(appHref(menu, dish.id))}">
               <span class="dish-name">${esc(dish.name)}</span>
@@ -307,10 +460,12 @@ function carta(menu) {
               <span class="dish-blurb">${esc(dish.blurb)}</span>
             </a>
           </li>
-        `).join("")}
+        `;
+        }).join("")}
       </ul>
     </section>
-  `).join("");
+  `;
+  }).join("");
 
   return `
     <div class="screen">
@@ -321,6 +476,7 @@ function carta(menu) {
           <div class="flourish" aria-hidden="true"><span></span></div>
           <h1>${esc(copy.carta)}</h1>
           <p class="kitchen">${esc(copy.kitchen)}</p>
+          ${langSwitch(menu)}
         </header>
         ${sections}
         <button class="order-btn" type="button" data-action="view-order" data-menu="${esc(menu)}">
@@ -333,12 +489,12 @@ function carta(menu) {
 }
 
 function pedidoView(menu) {
-  const copy = UI[menu];
+  const copy = copyOf(menu);
   const items = cartForMenu(menu);
   const lines = items.map((entry) => {
     const found = findDish(menu, entry.id);
     if (!found) return "";
-    const { dish } = found;
+    const dish = textDish(menu, found.dish);
     const lineTotal = dish.price * entry.qty;
     return `
       <li class="order-line" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}">
@@ -384,7 +540,7 @@ function pedidoView(menu) {
 }
 
 function pedidoPlacedView(menu) {
-  const copy = UI[menu];
+  const copy = copyOf(menu);
   return `
     <div class="screen">
       <article class="sheet sheet-pad order-sheet" data-accent="${menu}">
@@ -400,7 +556,7 @@ function pedidoPlacedView(menu) {
 }
 
 function viewerMarkup(menu, section, dish) {
-  const copy = UI[menu];
+  const copy = copyOf(menu);
   const qty = cartQty(menu, dish.id);
   const nutrients = copy.nutrients.map((item) => `
     <div>
@@ -457,7 +613,7 @@ function viewerMarkup(menu, section, dish) {
 }
 
 function missing(menu) {
-  const copy = UI[menu];
+  const copy = copyOf(menu);
   return `
     <div class="screen">
       <article class="sheet sheet-pad" data-accent="${menu}">
@@ -563,7 +719,7 @@ function setViewerHint(text) {
 
 function mountViewer(menu, dish) {
   const token = generation;
-  const copy = UI[menu];
+  const copy = copyOf(menu);
   const canvas = app.querySelector(".viewer-canvas");
   if (!canvas) return;
 
@@ -887,7 +1043,7 @@ function placementHint(view, copy) {
 }
 
 function factsHtml(menu, section, dish) {
-  const copy = UI[menu];
+  const copy = copyOf(menu);
   const nutrients = copy.nutrients.map((item) => `
     <div>
       <dt>${esc(item.label)}</dt>
@@ -904,7 +1060,7 @@ function factsHtml(menu, section, dish) {
 function fillViewerCard(menu, section, dish) {
   const card = app.querySelector(".viewer-card");
   if (!card) return;
-  const copy = UI[menu];
+  const copy = copyOf(menu);
   const title = card.querySelector("h1");
   const priceEl = card.querySelector(".price-lg");
   const track = card.querySelector(".viewer-facts-track");
@@ -946,7 +1102,7 @@ function selectGroup(view, group, hint) {
   const found = findDish(menu, dishId);
   if (!found) return;
   view.selectedGroup = group;
-  fillViewerCard(menu, found.section, found.dish);
+  fillViewerCard(menu, textSection(menu, found.section), textDish(menu, found.dish));
   const several = placedGroups(view).length > 1;
   if (several) {
     const ring = ensureSelectRing(view);
@@ -958,7 +1114,7 @@ function selectGroup(view, group, hint) {
     view.selectRing?.removeFromParent();
   }
   if (hint) setViewerHint(hint);
-  else if (several) setViewerHint(UI[menu].selectHint);
+  else if (several) setViewerHint(copyOf(menu).selectHint);
 }
 
 function placedGroups(view) {
@@ -1039,7 +1195,7 @@ function selectAlongXR(view, event) {
 
 function pinLiveDish(view) {
   if (!view?.session) return;
-  const copy = UI[view.menu];
+  const copy = copyOf(view.menu);
   if (!view.dishPlaced || !view.placed || !view.model) {
     showViewerAlert(copy.pinNeedPlace);
     return;
@@ -1154,7 +1310,7 @@ function mountLiveDish(view, menu, dishId) {
 
 function showDishInSession(menu, section, dish) {
   const view = active;
-  const copy = UI[menu];
+  const copy = copyOf(menu);
   view.menu = menu;
   const pinBtn = app.querySelector(".viewer-pin");
   const scan = app.querySelector(".viewer-scan");
@@ -1307,7 +1463,7 @@ function finishSession(view) {
   showStudio(view);
   const scan = app.querySelector(".viewer-scan");
   if (scan) scan.hidden = false;
-  setViewerHint(UI[view.menu].scanReady);
+  setViewerHint(copyOf(view.menu).scanReady);
   view.start();
 }
 
@@ -1517,7 +1673,7 @@ function drawXR(view, copy, frame) {
 function beginScan() {
   const view = active;
   if (!view || view.session || view.starting || !view.arReady) return;
-  const copy = UI[view.menu];
+  const copy = copyOf(view.menu);
   const overlay = app.querySelector(".viewer-overlay");
   view.starting = true;
   view.model.rotation.y = 0;
@@ -1855,6 +2011,14 @@ function onClick(event) {
   }
 
   const action = event.target.closest("[data-action]");
+  if (action?.dataset.action === "set-lang") {
+    const { menu, lang } = action.dataset;
+    if ((menu === "pe" || menu === "br") && (lang === "es" || lang === "pt") && lang !== menuLang(menu)) {
+      setMenuLang(menu, lang);
+      render();
+    }
+    return;
+  }
   if (action?.dataset.action === "copy-slug") copySlug(action);
   if (action?.dataset.action === "start-ar") beginScan();
   if (action?.dataset.action === "pin-dish") {
@@ -1865,7 +2029,7 @@ function onClick(event) {
     const { menu, dish } = action.dataset;
     const qty = addToCart(menu, dish);
     paintAddButton(action, qty);
-    showToast(UI[menu].addedToast);
+    showToast(copyOf(menu).addedToast);
   }
   if (action?.dataset.action === "view-order") {
     event.preventDefault();

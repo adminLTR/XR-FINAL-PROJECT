@@ -472,6 +472,251 @@ export const MENUS = {
   },
 };
 
+/** Texto de la carta en el idioma que no es el de origen. Perú nace en español; Brasil, en portugués. */
+const TRANSLATIONS = {
+  pe: {
+    kitchen: "Cozinha peruana",
+    missingBody: "O link não corresponde a nenhum prato do cardápio peruano.",
+    sections: {
+      entradas: "Entradas",
+      fondos: "Pratos",
+      postres: "Sobremesas",
+      bebidas: "Bebidas",
+    },
+    dishes: {
+      ceviche: {
+        name: "Ceviche clássico",
+        blurb: "Peixe do dia, limão, cebola e pimenta limo.",
+        description: "Cortes de peixe fresco marinados no limão, com cebola roxa, pimenta limo, milho e batata-doce glaceada.",
+        portion: "1 porção · 300 g",
+        note: "Preparado na hora.",
+        allergens: ["Peixe"],
+      },
+      "causa-limena": {
+        name: "Causa limenha",
+        blurb: "Batata amarela, frango, abacate e ovo.",
+        description: "Causa de batata amarela temperada com pimenta amarela e limão, recheada de frango desfiado, com abacate e ovo.",
+        portion: "1 porção · 280 g",
+        note: "",
+        allergens: ["Ovo"],
+      },
+      "papa-huancaina": {
+        name: "Batata à huancaína",
+        blurb: "Batata amarela e creme de pimenta amarela.",
+        description: "Batata amarela cozida, coberta com creme de pimenta amarela, queijo fresco e biscoito, com ovo e azeitona.",
+        portion: "1 porção · 260 g",
+        note: "",
+        allergens: ["Leite", "Ovo", "Glúten"],
+      },
+      anticuchos: {
+        name: "Anticuchos",
+        blurb: "Coração grelhado com pimenta panca.",
+        description: "Anticuchos de coração de boi na brasa, temperados com pimenta panca, acompanhados de batata e milho.",
+        portion: "1 porção · 250 g",
+        note: "Picante moderado.",
+        allergens: [],
+      },
+      "lomo-saltado": {
+        name: "Lomo saltado",
+        blurb: "Lombo, cebola, tomate e batatas fritas.",
+        description: "Tiras de lombo salteadas na wok com cebola, tomate e molho de soja, com batatas fritas e arroz branco.",
+        portion: "1 porção · 450 g",
+        note: "",
+        allergens: ["Glúten", "Soja"],
+      },
+      "aji-de-gallina": {
+        name: "Ají de gallina",
+        blurb: "Frango desfiado em creme de pimenta amarela.",
+        description: "Peito de galinha desfiado em creme de pimenta amarela, nozes e queijo, com batata cozida, ovo e arroz.",
+        portion: "1 porção · 400 g",
+        note: "",
+        allergens: ["Leite", "Ovo", "Nozes"],
+      },
+      "arroz-con-pollo": {
+        name: "Arroz com frango",
+        blurb: "Arroz verde com coentro e ervilhas.",
+        description: "Arroz verde com coentro, frango macio, ervilhas e pimentão. Servido com salsa criolla.",
+        portion: "1 porção · 420 g",
+        note: "O tempero leva coentro.",
+        allergens: [],
+      },
+      "seco-de-res": {
+        name: "Seco de carne",
+        blurb: "Ensopado de coentro com feijão.",
+        description: "Carne estufada em tempero de coentro, servida com feijão guisado e arroz branco.",
+        portion: "1 porção · 430 g",
+        note: "",
+        allergens: [],
+      },
+      "pollo-a-la-brasa": {
+        name: "Frango na brasa",
+        blurb: "Quarto de frango com batatas fritas.",
+        description: "Quarto de frango marinado na brasa, com batatas fritas e salada fresca.",
+        portion: "1/4 de frango · 480 g",
+        note: "",
+        allergens: [],
+      },
+      "suspiro-limeno": {
+        name: "Suspiro limenho",
+        blurb: "Doce de leite e merengue de vinho do Porto.",
+        description: "Doce de leite coberto com merengue de vinho do Porto, o doce de Lima, com canela.",
+        portion: "1 porção · 140 g",
+        note: "",
+        allergens: ["Leite", "Ovo"],
+      },
+      "chicha-morada": {
+        name: "Chicha morada",
+        blurb: "Milho roxo, abacaxi e canela.",
+        description: "Milho roxo fervido com abacaxi, maçã, canela e cravo, coado e servido bem gelado.",
+        portion: "1 copo · 350 ml",
+        note: "Preparada em casa.",
+        allergens: [],
+      },
+      limonada: {
+        name: "Limonada",
+        blurb: "Limão espremido na hora e hortelã.",
+        description: "Limão espremido na hora, com hortelã e um toque de açúcar, servida com gelo.",
+        portion: "1 copo · 350 ml",
+        note: "",
+        allergens: [],
+      },
+      maracuya: {
+        name: "Suco de maracujá",
+        blurb: "Polpa de maracujá e limão.",
+        description: "Polpa de maracujá batida com limão e açúcar, servida gelada.",
+        portion: "1 copo · 350 ml",
+        note: "",
+        allergens: [],
+      },
+      "inca-kola": {
+        name: "Inca Kola",
+        blurb: "O refrigerante dourado do Peru.",
+        description: "Garrafa bem gelada de Inca Kola.",
+        portion: "1 garrafa · 500 ml",
+        note: "Servida gelada.",
+        allergens: [],
+      },
+    },
+  },
+  br: {
+    kitchen: "Cocina brasileña",
+    missingBody: "El enlace no coincide con ningún plato del menú brasileño.",
+    sections: {
+      "para-comecar": "Para empezar",
+      pratos: "Platos principales",
+      doces: "Postres",
+    },
+    dishes: {
+      "pao-de-queijo": {
+        name: "Pan de queso",
+        blurb: "Almidón de yuca y queso minas, seis unidades.",
+        description: "Seis pancitos de almidón de yuca agrio y queso minas, horneados al momento, calientes por dentro.",
+        portion: "6 unidades · 180 g",
+        note: "Receta sin gluten.",
+        allergens: ["Lácteos", "Huevo"],
+      },
+      coxinha: {
+        name: "Coxinha de pollo",
+        blurb: "Masa de papa y pollo cremoso.",
+        description: "Coxinha de masa de papa con relleno cremoso de pollo deshilachado, empanada y frita.",
+        portion: "1 unidad · 130 g",
+        note: "",
+        allergens: ["Gluten", "Lácteos", "Huevo"],
+      },
+      acaraje: {
+        name: "Acarajé",
+        blurb: "Frijol carita, vatapá y camarón.",
+        description: "Bollo de frijol carita frito en aceite de dendê, abierto y relleno con vatapá, caruru y camarón seco.",
+        portion: "1 unidad · 200 g",
+        note: "Lleva dendê.",
+        allergens: ["Crustáceos"],
+      },
+      feijoada: {
+        name: "Feijoada",
+        blurb: "Frijol negro, carnes, col y naranja.",
+        description: "Feijoada completa de frijol negro con carnes de cerdo, acompañada de arroz, col salteada, farofa y naranja.",
+        portion: "1 porción · 500 g",
+        note: "",
+        allergens: [],
+      },
+      moqueca: {
+        name: "Moqueca bahiana",
+        blurb: "Pescado, leche de coco y dendê.",
+        description: "Pescado cocido a fuego lento con leche de coco, pimientos, tomate, aceite de dendê y cilantro. Se sirve con arroz.",
+        portion: "1 porción · 450 g",
+        note: "Lleva dendê y cilantro.",
+        allergens: ["Pescado"],
+      },
+      picanha: {
+        name: "Picanha a la parrilla",
+        blurb: "Picanha al punto, farofa y vinagreta.",
+        description: "Lonja de picanha a la brasa, al punto, con farofa de mantequilla y vinagreta.",
+        portion: "1 porción · 380 g",
+        note: "",
+        allergens: [],
+      },
+      "bobo-de-camarao": {
+        name: "Bobó de camarón",
+        blurb: "Camarón en crema de yuca.",
+        description: "Camarones salteados sobre crema de yuca, leche de coco y dendê, con arroz blanco.",
+        portion: "1 porción · 420 g",
+        note: "Lleva dendê.",
+        allergens: ["Crustáceos"],
+      },
+      "baiao-de-dois": {
+        name: "Baião de dois",
+        blurb: "Arroz, frijol verde y queso coalho.",
+        description: "Arroz y frijol verde cocidos juntos con queso coalho, carne seca y mantequilla de botella.",
+        portion: "1 porción · 380 g",
+        note: "",
+        allergens: ["Lácteos"],
+      },
+      escondidinho: {
+        name: "Escondidinho de carne seca",
+        blurb: "Carne seca bajo puré de yuca.",
+        description: "Carne seca deshilachada salteada, cubierta con puré de yuca y queso gratinado.",
+        portion: "1 porción · 400 g",
+        note: "",
+        allergens: ["Lácteos"],
+      },
+      brigadeiro: {
+        name: "Brigadeiro",
+        blurb: "Cuatro brigadeiros con granulado.",
+        description: "Cuatro brigadeiros de leche condensada y chocolate, pasados por el granulado.",
+        portion: "4 unidades · 80 g",
+        note: "",
+        allergens: ["Lácteos"],
+      },
+    },
+  },
+};
+
+export function nativeLang(menuId) {
+  return menuId === "br" ? "pt" : "es";
+}
+
+export function localizedSection(menuId, section, lang) {
+  if (!section || lang === nativeLang(menuId)) return section;
+  const title = TRANSLATIONS[menuId]?.sections?.[section.id];
+  return title ? { ...section, title } : section;
+}
+
+export function localizedDish(menuId, dish, lang) {
+  if (!dish || lang === nativeLang(menuId)) return dish;
+  const text = TRANSLATIONS[menuId]?.dishes?.[dish.id];
+  return text ? { ...dish, ...text } : dish;
+}
+
+export function localizedKitchen(menuId, lang) {
+  if (lang === nativeLang(menuId)) return UI[menuId].kitchen;
+  return TRANSLATIONS[menuId]?.kitchen || UI[menuId].kitchen;
+}
+
+export function localizedMissingBody(menuId, lang) {
+  if (lang === nativeLang(menuId)) return UI[menuId].missingBody;
+  return TRANSLATIONS[menuId]?.missingBody || UI[menuId].missingBody;
+}
+
 export function findDish(menuId, dishId) {
   const menu = MENUS[menuId];
   if (!menu || !dishId) return null;
