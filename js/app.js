@@ -11,6 +11,19 @@ import {
   localizedMissingTitle,
 } from "./menus.js";
 import { loadDishModel, prefetchDishModels, isDishModelReady } from "./models.js";
+import {
+  attachCeviche,
+  beginCevicheDrag,
+  cancelCevicheDrag,
+  closeCevicheIfOpen,
+  endCevicheDrag,
+  moveCevicheDrag,
+  omitKey,
+  omitNote,
+  orderedOmit,
+  tickCeviche,
+  toggleCeviche,
+} from "./ceviche.js";
 
 const app = document.querySelector("#app");
 
@@ -183,25 +196,31 @@ function writeCart(items) {
   }
 }
 
-function cartQty(menu, dishId) {
-  const item = readCart().find((entry) => entry.menu === menu && entry.id === dishId);
+function sameCartLine(entry, menu, dishId, omit) {
+  return entry.menu === menu && entry.id === dishId && omitKey(entry.omit) === omitKey(omit);
+}
+
+function cartQty(menu, dishId, omit = []) {
+  const item = readCart().find((entry) => sameCartLine(entry, menu, dishId, omit));
   return item ? item.qty : 0;
 }
 
-function addToCart(menu, dishId) {
+function addToCart(menu, dishId, omit = []) {
   const items = readCart();
-  const item = items.find((entry) => entry.menu === menu && entry.id === dishId);
+  const removed = orderedOmit(omit);
+  const item = items.find((entry) => sameCartLine(entry, menu, dishId, removed));
   if (item) item.qty += 1;
-  else items.push({ menu, id: dishId, qty: 1 });
+  else items.push({ menu, id: dishId, qty: 1, omit: removed });
   writeCart(items);
   return item ? item.qty : 1;
 }
 
-function setCartQty(menu, dishId, qty) {
-  const items = readCart().filter((entry) => !(entry.menu === menu && entry.id === dishId));
-  if (qty > 0) items.push({ menu, id: dishId, qty });
+function setCartQty(menu, dishId, qty, omit = []) {
+  const removed = orderedOmit(omit);
+  const items = readCart().filter((entry) => !sameCartLine(entry, menu, dishId, removed));
+  if (qty > 0) items.push({ menu, id: dishId, qty, omit: removed });
   writeCart(items);
-  return items;
+  return qty;
 }
 
 function cartForMenu(menu) {
@@ -543,16 +562,21 @@ function pedidoView(menu) {
     if (!found) return "";
     const dish = textDish(menu, found.dish);
     const lineTotal = dish.price * entry.qty;
+    const note = omitNote(entry.omit, menuLang(menu));
+    const omit = omitKey(entry.omit);
     return `
-      <li class="order-line" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}">
+      <li class="order-line" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}" data-omit="${esc(omit)}">
         <div class="order-line-main">
-          <span class="order-line-name">${esc(dish.name)}</span>
+          <div>
+            <span class="order-line-name">${esc(dish.name)}</span>
+            ${note ? `<p class="order-line-note">${esc(note)}</p>` : ""}
+          </div>
           <span class="order-line-price">${esc(price(menu, lineTotal))}</span>
         </div>
-        <div class="order-line-qty" aria-label="${esc(dish.name)}">
-          <button type="button" class="order-qty-btn" data-action="cart-dec" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}" aria-label="−">−</button>
+        <div class="order-line-qty" aria-label="${esc(note ? `${dish.name}, ${note}` : dish.name)}">
+          <button type="button" class="order-qty-btn" data-action="cart-dec" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}" data-omit="${esc(omit)}" aria-label="−">−</button>
           <span class="order-qty-val">${entry.qty}</span>
-          <button type="button" class="order-qty-btn" data-action="cart-inc" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}" aria-label="+">+</button>
+          <button type="button" class="order-qty-btn" data-action="cart-inc" data-menu="${esc(menu)}" data-dish="${esc(dish.id)}" data-omit="${esc(omit)}" aria-label="+">+</button>
         </div>
       </li>
     `;
@@ -632,6 +656,7 @@ function shellMarkup(menu) {
             <span class="viewer-add-count" hidden></span>
           </button>
         </div>
+        <p class="viewer-omit" hidden></p>
         <div class="viewer-facts">
           <div class="viewer-facts-scroller" data-facts-scroller>
             <div class="viewer-facts-track"></div>
@@ -1245,7 +1270,8 @@ function setDishScale(view, scale) {
   keepDishDepth(view.model);
   view.model.scale.setScalar(scale);
   const shadowScale = scale / DISH_SCALE_SHADOW_REF;
-  view.shadow.scale.set(shadowScale, shadowScale, shadowScale);
+  const plateBoost = view.model.getObjectByName("plate") ? 1.7 : 1;
+  view.shadow.scale.set(shadowScale * plateBoost, shadowScale * plateBoost, shadowScale);
 }
 
 function applyViewerLighting(view, studio) {
@@ -1469,8 +1495,41 @@ function selectGroup(view, group, hint) {
   } else {
     view.selectRing?.removeFromParent();
   }
+  syncOmitUI(group);
   if (hint) setViewerHint(hint);
-  else setViewerHint(copyOf(menu).spinHint);
+  else setViewerHint(assemblyHint(group, menu));
+}
+
+function assemblyHint(group, menu) {
+  const asm = group.userData.assembly;
+  const copy = copyOf(menu);
+  if (!asm) return copy.spinHint;
+  if (asm.phase === "open" || asm.phase === "opening") return copy.cevicheOpenHint;
+  return copy.cevicheHint;
+}
+
+function syncOmitUI(group) {
+  const note = app.querySelector(".viewer-omit");
+  const add = app.querySelector(".viewer-card [data-action='add-dish']");
+  if (!group || active?.selectedGroup !== group) {
+    if (note) {
+      note.textContent = "";
+      note.hidden = true;
+    }
+    return;
+  }
+  const menu = group.userData.pin?.menu || group.userData.menu;
+  const dishId = group.userData.pin?.dishId || group.userData.dishId;
+  const omit = [...(group.userData.assembly?.omit || [])];
+  const text = omitNote(omit, menuLang(menu));
+  if (note) {
+    note.textContent = text;
+    note.hidden = !text;
+  }
+  if (add && add.dataset.dish === dishId) {
+    add.dataset.omit = omitKey(omit);
+    paintAddButton(add, cartQty(menu, dishId, omit));
+  }
 }
 
 function placedGroups(view) {
@@ -1544,11 +1603,13 @@ function dishHitAtPointer(view, event) {
 }
 
 function selectDishAtPointer(view, event) {
-  if (!view.session) return false;
+  if (!view.session) return null;
   const groups = placedGroups(view);
-  if (!groups.length) return false;
+  if (!groups.length) return null;
   const cam = setPointerRay(view, event);
-  if (selectFromHits(view, _raycaster.intersectObjects(groups, true), groups)) return true;
+  const hits = _raycaster.intersectObjects(groups, true);
+  const meshHit = hits.length ? groupOf(hits[0].object, groups) : null;
+  if (meshHit) return meshHit;
   let best = null;
   let bestDist = 0.16;
   for (const group of groups) {
@@ -1561,9 +1622,7 @@ function selectDishAtPointer(view, event) {
       best = group;
     }
   }
-  if (!best) return false;
-  selectGroup(view, best);
-  return true;
+  return best;
 }
 
 function selectAlongXR(view, event) {
@@ -1592,6 +1651,7 @@ function unbindOverlay(view) {
   view.overlay?.removeEventListener("pointercancel", view.onPointerUpAR);
   view.pointers?.clear();
   view.grab = null;
+  cancelCevicheDrag(view);
   view.twist = null;
 }
 
@@ -1627,6 +1687,7 @@ function beginGrab(view, event, group) {
     startX: event.clientX,
     startY: event.clientY,
     moved: false,
+    separate: false,
   };
 }
 
@@ -1816,6 +1877,7 @@ function mountLiveDish(view, menu, dishId) {
     if (view.liveToken !== token || view.placed !== placed) return;
     placed.add(loaded);
     view.model = loaded;
+    if (dishId === "ceviche") attachCeviche(placed, loaded);
     setDishScale(view, DISH_SCALE_AR);
     view.liveRadius = worldFootprint(placed);
     if (!view.dishPlaced) {
@@ -2132,6 +2194,10 @@ function drawXR(view, copy, frame) {
       }
     }
     stickDish(view, frame);
+    const now = performance.now();
+    const asmDt = view.asmClock ? (now - view.asmClock) / 1000 : 0;
+    view.asmClock = now;
+    tickCeviche(placedGroups(view), asmDt);
     try {
       prepareOcclusion(view, frame);
     } catch (error) {
@@ -2228,6 +2294,7 @@ function beginScan() {
     view.onPlacePointer = (event) => {
       if (!view.session || event.button) return;
       view.lastPointerAt = performance.now();
+      view.looseTap = null;
       if (isHudControl(event)) {
         view.suppressPlace = true;
         return;
@@ -2243,6 +2310,8 @@ function beginScan() {
       }
       if (view.pointers.size >= 2) {
         view.suppressPlace = true;
+        const dragged = cancelCevicheDrag(view);
+        if (dragged?.removed) syncOmitUI(dragged.group);
         if (view.selectedGroup && !view.twist) beginTwist(view);
         return;
       }
@@ -2250,15 +2319,39 @@ function beginScan() {
         view.suppressPlace = true;
         return;
       }
+      const ingredientGroup = beginCevicheDrag(view, event, placedGroups(view));
+      if (ingredientGroup) {
+        view.suppressPlace = true;
+        if (view.selectedGroup !== ingredientGroup) selectGroup(view, ingredientGroup);
+        return;
+      }
       const hitGroup = dishHitAtPointer(view, event);
       if (hitGroup) {
         view.suppressPlace = true;
-        if (view.selectedGroup !== hitGroup) selectGroup(view, hitGroup);
+        const already = view.selectedGroup === hitGroup;
+        if (!already) {
+          if (view.selectedGroup) closeCevicheIfOpen(view.selectedGroup);
+          selectGroup(view, hitGroup);
+        }
         beginGrab(view, event, hitGroup);
+        if (view.grab) view.grab.separate = already;
         return;
       }
-      if (selectDishAtPointer(view, event)) {
+      const loose = selectDishAtPointer(view, event);
+      if (loose) {
         view.suppressPlace = true;
+        const already = view.selectedGroup === loose;
+        if (!already) {
+          if (view.selectedGroup) closeCevicheIfOpen(view.selectedGroup);
+          selectGroup(view, loose);
+        }
+        view.looseTap = {
+          pointerId: event.pointerId,
+          group: loose,
+          separate: already,
+          x: event.clientX,
+          y: event.clientY,
+        };
         return;
       }
       tryPlaceDish(view);
@@ -2271,6 +2364,8 @@ function beginScan() {
       if (view.twist) {
         event.preventDefault();
         updateTwist(view);
+      } else if (moveCevicheDrag(view, event)) {
+        event.preventDefault();
       } else if (view.grab) {
         event.preventDefault();
         updateGrab(view, event);
@@ -2278,8 +2373,34 @@ function beginScan() {
     };
     view.onPointerUpAR = (event) => {
       view.pointers?.delete(event.pointerId);
+      const twisting = Boolean(view.twist);
       if (view.twist && (view.pointers?.size || 0) < 2) view.twist = null;
-      if (view.grab && event.pointerId === view.grab.pointerId) view.grab = null;
+      const dragged = endCevicheDrag(view, event);
+      if (dragged?.removed) syncOmitUI(dragged.group);
+      if (dragged) {
+        view.looseTap = null;
+        return;
+      }
+      const loose = view.looseTap;
+      view.looseTap = null;
+      if (loose && loose.pointerId === event.pointerId && loose.separate && !twisting) {
+        const moved = Math.hypot(event.clientX - loose.x, event.clientY - loose.y);
+        if (moved < 12) {
+          const menu = loose.group.userData.pin?.menu || loose.group.userData.menu || view.menu;
+          const next = toggleCeviche(loose.group, xrCamera(view), menuLang(menu));
+          if (next) setViewerHint(assemblyHint(loose.group, menu));
+        }
+      }
+      if (view.grab && event.pointerId === view.grab.pointerId) {
+        const tapped = !view.grab.moved && !twisting && view.grab.separate;
+        const group = view.grab.group;
+        view.grab = null;
+        if (tapped) {
+          const menu = group.userData.pin?.menu || group.userData.menu || view.menu;
+          const next = toggleCeviche(group, xrCamera(view), menuLang(menu));
+          if (next) setViewerHint(assemblyHint(group, menu));
+        }
+      }
     };
     view.overlay = overlay;
     if (overlay) overlay.style.pointerEvents = "auto";
@@ -2611,9 +2732,11 @@ function onClick(event) {
   }
   if (action?.dataset.action === "add-dish") {
     const { menu, dish } = action.dataset;
-    const qty = addToCart(menu, dish);
+    const omit = action.dataset.omit ? action.dataset.omit.split("|").filter(Boolean) : [];
+    const qty = addToCart(menu, dish, omit);
     paintAddButton(action, qty);
-    showToast(copyOf(menu).addedToast);
+    const note = omitNote(omit, menuLang(menu));
+    showToast(note ? `${copyOf(menu).addedToast}. ${note}` : copyOf(menu).addedToast);
   }
   if (action?.dataset.action === "view-order") {
     event.preventDefault();
@@ -2622,14 +2745,16 @@ function onClick(event) {
     return;
   }
   if (action?.dataset.action === "cart-inc") {
-    const qty = cartQty(action.dataset.menu, action.dataset.dish) + 1;
-    setCartQty(action.dataset.menu, action.dataset.dish, qty);
+    const omit = action.dataset.omit ? action.dataset.omit.split("|").filter(Boolean) : [];
+    const qty = cartQty(action.dataset.menu, action.dataset.dish, omit) + 1;
+    setCartQty(action.dataset.menu, action.dataset.dish, qty, omit);
     render();
     return;
   }
   if (action?.dataset.action === "cart-dec") {
-    const qty = cartQty(action.dataset.menu, action.dataset.dish) - 1;
-    setCartQty(action.dataset.menu, action.dataset.dish, qty);
+    const omit = action.dataset.omit ? action.dataset.omit.split("|").filter(Boolean) : [];
+    const qty = cartQty(action.dataset.menu, action.dataset.dish, omit) - 1;
+    setCartQty(action.dataset.menu, action.dataset.dish, qty, omit);
     render();
     return;
   }
