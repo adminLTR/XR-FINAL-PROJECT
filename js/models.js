@@ -551,6 +551,37 @@ export function ingredientLabel(id, lang) {
 
 const CEVICHE_KEY = "assembly:ceviche";
 
+function createEmptyPlate() {
+  const group = new THREE.Group();
+  group.name = "empty-plate";
+  group.visible = false;
+  const ceramic = new THREE.MeshStandardMaterial({
+    color: 0xf7f3ec,
+    roughness: 0.46,
+    metalness: 0.02,
+    side: THREE.DoubleSide,
+  });
+  const lip = new THREE.MeshStandardMaterial({
+    color: 0xe9e0d2,
+    roughness: 0.34,
+    metalness: 0.06,
+  });
+  const body = new THREE.Mesh(lathe([
+    [0, 0.008],
+    [0.3, 0.014],
+    [0.4, 0.026],
+    [0.45, 0.046],
+    [0.46, 0.058],
+    [0.442, 0.066],
+  ], 80), ceramic);
+  group.add(body);
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(0.448, 0.01, 8, 80), lip);
+  rim.rotation.x = Math.PI / 2;
+  rim.position.y = 0.056;
+  group.add(rim);
+  return group;
+}
+
 function partUrl(file) {
   return new URL(`ceviche/${file}`, MODELS_DIR).href;
 }
@@ -573,6 +604,7 @@ function ensureCeviche() {
     const root = new THREE.Group();
     root.name = "ceviche-assembly";
     root.userData.source = "glb";
+    root.add(createEmptyPlate());
     const food = new THREE.Group();
     food.name = "ceviche-food";
     food.add(foodScene);

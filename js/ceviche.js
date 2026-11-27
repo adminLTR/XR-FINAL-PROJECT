@@ -82,6 +82,7 @@ function ensureLabels(asm, lang) {
 export function attachCeviche(placed, model) {
   const food = model.getObjectByName("ceviche-food");
   const holder = model.getObjectByName("ceviche-parts");
+  const plate = model.getObjectByName("empty-plate");
   if (!food || !holder) return;
   const pieces = [...holder.children]
     .filter((node) => node.userData?.ingredientId)
@@ -103,6 +104,7 @@ export function attachCeviche(placed, model) {
     t: 0,
     omit: new Set(),
     food,
+    plate,
     model,
     pieces,
     labelLang: "",
@@ -112,19 +114,6 @@ export function attachCeviche(placed, model) {
 
 function alive(asm) {
   return asm.pieces.filter((piece) => !asm.omit.has(piece.id));
-}
-
-function layoutNest(asm) {
-  const pieces = alive(asm);
-  const count = pieces.length;
-  pieces.forEach((piece, index) => {
-    if (count <= 1) {
-      piece.nest.set(0, 0.14, 0);
-      return;
-    }
-    const angle = (index / count) * Math.PI * 2 - Math.PI / 2;
-    piece.nest.set(Math.cos(angle) * 0.22, 0.14, Math.sin(angle) * 0.22);
-  });
 }
 
 function layoutFloat(asm, camera) {
@@ -186,9 +175,11 @@ function startOpen(asm, camera, lang) {
       piece.node.scale.setScalar(0.2);
     }
   }
-  asm.food.visible = fromPlate;
-  asm.foodFrom = fromPlate ? 1 : 0.08;
-  asm.foodTo = 0.08;
+  asm.food.visible = false;
+  asm.food.scale.setScalar(1);
+  asm.foodFrom = 1;
+  asm.foodTo = 1;
+  if (asm.plate) asm.plate.visible = true;
   asm.phase = "opening";
   asm.t = 0;
 }
@@ -197,7 +188,8 @@ function finishOpen(asm) {
   asm.phase = "open";
   asm.mode = "parts";
   asm.food.visible = false;
-  asm.food.scale.setScalar(0.08);
+  asm.food.scale.setScalar(1);
+  if (asm.plate) asm.plate.visible = true;
   for (const piece of alive(asm)) {
     piece.node.visible = true;
     piece.node.position.copy(piece.float);
@@ -206,50 +198,24 @@ function finishOpen(asm) {
 }
 
 function startClose(asm) {
-  const restoreFull = asm.omit.size === 0;
-  layoutNest(asm);
   for (const piece of asm.pieces) {
     piece.snap = false;
     piece.leaving = false;
-    if (asm.omit.has(piece.id)) {
-      piece.node.visible = false;
-      continue;
-    }
-    piece.from.copy(piece.node.position);
-    piece.to.copy(restoreFull ? ORIGIN : piece.nest);
-    piece.scaleFrom = piece.node.scale.x || 1;
-    piece.scaleTo = restoreFull ? 0.16 : 1;
-    piece.node.visible = true;
+    piece.node.visible = false;
   }
-  asm.restoreFull = restoreFull;
-  asm.food.visible = restoreFull;
-  asm.foodFrom = 0.08;
-  asm.foodTo = restoreFull ? 1 : 0.08;
-  if (restoreFull) asm.food.scale.setScalar(0.08);
-  asm.phase = "closing";
-  asm.t = 0;
+  if (asm.plate) asm.plate.visible = false;
+  asm.restoreFull = true;
+  asm.food.visible = true;
+  asm.food.scale.setScalar(1);
+  asm.foodFrom = 1;
+  asm.foodTo = 1;
+  asm.phase = "closed";
+  asm.mode = "full";
+  asm.t = 1;
 }
 
 function finishClose(asm) {
-  asm.phase = "closed";
-  if (asm.restoreFull) {
-    asm.mode = "full";
-    asm.food.visible = true;
-    asm.food.scale.setScalar(1);
-    for (const piece of asm.pieces) piece.node.visible = false;
-    return;
-  }
-  asm.mode = "custom";
-  asm.food.visible = false;
-  for (const piece of asm.pieces) {
-    if (asm.omit.has(piece.id)) {
-      piece.node.visible = false;
-      continue;
-    }
-    piece.node.visible = true;
-    piece.node.position.copy(piece.nest);
-    piece.node.scale.setScalar(1);
-  }
+  startClose(asm);
 }
 
 export function closeCevicheIfOpen(group) {
