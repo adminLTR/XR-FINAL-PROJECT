@@ -3,6 +3,10 @@ import { CEVICHE_PARTS, ingredientLabel } from "./models.js";
 
 const ORIGIN = new THREE.Vector3(0, 0.2, 0);
 const OPEN_MS = 0.86;
+const CLOSE_MS = 1.05;
+const BOB = 0.034;
+const DRIFT = 0.012;
+const BOB_SPEED = 2.05;
 const LEAVE_MS = 0.4;
 const SNAP_MS = 0.28;
 const PULL_AWAY = 0.32;
@@ -86,7 +90,7 @@ export function attachCeviche(placed, model) {
   if (!food || !holder) return;
   const pieces = [...holder.children]
     .filter((node) => node.userData?.ingredientId)
-    .map((node) => ({
+    .map((node, index) => ({
       id: node.userData.ingredientId,
       node,
       from: new THREE.Vector3(),
@@ -95,13 +99,16 @@ export function attachCeviche(placed, model) {
       float: new THREE.Vector3(),
       scaleFrom: 1,
       scaleTo: 1,
+      floatPhase: index * 1.25,
       leaving: false,
       snap: false,
+      held: false,
     }));
   placed.userData.assembly = {
     phase: "closed",
     mode: "full",
     t: 0,
+    floatTime: 0,
     omit: new Set(),
     food,
     plate,
@@ -143,7 +150,28 @@ function layoutFloat(asm, camera) {
   });
 }
 
+function poseClose(asm, amount) {
+  const gather = smooth(Math.min(amount / 0.72, 1));
+  const reveal = smooth(Math.max((amount - 0.46) / 0.54, 0));
+  for (const piece of asm.pieces) {
+    if (!piece.node.visible || asm.omit.has(piece.id)) continue;
+    piece.node.position.lerpVectors(piece.from, piece.to, gather);
+    const scale = piece.scaleFrom + (piece.scaleTo - piece.scaleFrom) * gather;
+    piece.node.scale.setScalar(Math.max(scale, 0.001));
+    if (reveal > 0.62) piece.node.visible = false;
+  }
+  if (reveal > 0.02) {
+    asm.food.visible = true;
+    asm.food.scale.setScalar(asm.foodFrom + (asm.foodTo - asm.foodFrom) * reveal);
+    if (asm.plate) asm.plate.visible = false;
+  }
+}
+
 function pose(asm, amount) {
+  if (asm.phase === "closing") {
+    poseClose(asm, amount);
+    return;
+  }
   const eased = smooth(amount);
   asm.food.scale.setScalar(asm.foodFrom + (asm.foodTo - asm.foodFrom) * eased);
   for (const piece of asm.pieces) {
@@ -170,6 +198,7 @@ function startOpen(asm, camera, lang) {
     piece.scaleFrom = fromPlate ? 0.2 : piece.node.scale.x;
     piece.scaleTo = 0.62;
     piece.node.visible = true;
+    piece.node.rotation.set(0, 0, 0);
     if (fromPlate) {
       piece.node.position.copy(ORIGIN);
       piece.node.scale.setScalar(0.2);
@@ -201,21 +230,40 @@ function startClose(asm) {
   for (const piece of asm.pieces) {
     piece.snap = false;
     piece.leaving = false;
-    piece.node.visible = false;
+    piece.held = false;
+    if (asm.omit.has(piece.id) || !piece.node.visible) {
+      piece.node.visible = false;
+      continue;
+    }
+    piece.from.copy(piece.node.position);
+    piece.to.copy(ORIGIN);
+    piece.scaleFrom = piece.node.scale.x || 0.62;
+    piece.scaleTo = 0.06;
+    piece.node.visible = true;
   }
-  if (asm.plate) asm.plate.visible = false;
+  if (asm.plate) asm.plate.visible = true;
   asm.restoreFull = true;
-  asm.food.visible = true;
-  asm.food.scale.setScalar(1);
-  asm.foodFrom = 1;
+  asm.food.visible = false;
+  asm.food.scale.setScalar(0.72);
+  asm.foodFrom = 0.72;
   asm.foodTo = 1;
-  asm.phase = "closed";
+  asm.phase = "closing";
   asm.mode = "full";
-  asm.t = 1;
+  asm.t = 0;
 }
 
 function finishClose(asm) {
-  startClose(asm);
+  asm.phase = "closed";
+  asm.mode = "full";
+  asm.restoreFull = true;
+  asm.food.visible = true;
+  asm.food.scale.setScalar(1);
+  if (asm.plate) asm.plate.visible = false;
+  for (const piece of asm.pieces) {
+    piece.held = false;
+    piece.node.visible = false;
+    piece.node.rotation.set(0, 0, 0);
+  }
 }
 
 export function closeCevicheIfOpen(group) {
@@ -243,11 +291,24 @@ export function tickCeviche(groups, dt) {
     const asm = group.userData.assembly;
     if (!asm) continue;
     if (asm.phase === "opening" || asm.phase === "closing") {
-      asm.t += step / OPEN_MS;
+      const duration = asm.phase === "closing" ? CLOSE_MS : OPEN_MS;
+      asm.t += step / duration;
       pose(asm, Math.min(asm.t, 1));
       if (asm.t >= 1) {
         if (asm.phase === "opening") finishOpen(asm);
         else finishClose(asm);
+      }
+    } else if (asm.phase === "open") {
+      asm.floatTime += step;
+      for (const piece of alive(asm)) {
+        if (piece.leaving || piece.snap || piece.held) continue;
+        const wave = asm.floatTime * BOB_SPEED + piece.floatPhase;
+        piece.node.position.set(
+          piece.float.x + Math.sin(wave * 0.73) * DRIFT,
+          piece.float.y + Math.sin(wave) * BOB,
+          piece.float.z + Math.cos(wave * 0.81) * DRIFT,
+        );
+        piece.node.rotation.y = Math.sin(wave * 0.42) * 0.16;
       }
     }
     for (const piece of asm.pieces) {
@@ -320,6 +381,7 @@ export function beginCevicheDrag(view, event, groups) {
   const piece = group?.userData.assembly.pieces.find((item) => item.node === node);
   if (!group || !piece) return null;
   piece.snap = false;
+  piece.held = true;
   piece.node.updateWorldMatrix(true, false);
   view.ingredientDrag = {
     pointerId: event.pointerId,
@@ -367,6 +429,7 @@ export function releaseCevicheDrag(view, { cancel = false } = {}) {
   if (!drag) return null;
   view.ingredientDrag = null;
   const piece = drag.piece;
+  piece.held = false;
   const asm = drag.group.userData.assembly;
   const pulled = drag.moved && piece.node.position.distanceTo(piece.float) > PULL_AWAY;
   if (!cancel && pulled && asm?.phase === "open") {
