@@ -522,7 +522,7 @@ function prepareGltfScene(object) {
   });
 }
 
-function fitGlbToScene(object, target = 1.15) {
+function fitGlbToScene(object, target = 0.92) {
   const bounds = new THREE.Box3().setFromObject(object);
   if (bounds.isEmpty()) return;
   const size = bounds.getSize(new THREE.Vector3());
@@ -551,37 +551,6 @@ export function ingredientLabel(id, lang) {
 
 const CEVICHE_KEY = "assembly:ceviche";
 
-function createServingPlate() {
-  const group = new THREE.Group();
-  group.name = "plate";
-  const ceramic = new THREE.MeshStandardMaterial({
-    color: 0xf7f3ec,
-    roughness: 0.46,
-    metalness: 0.02,
-    side: THREE.DoubleSide,
-  });
-  const lip = new THREE.MeshStandardMaterial({
-    color: 0xe9e0d2,
-    roughness: 0.34,
-    metalness: 0.06,
-  });
-  const body = new THREE.Mesh(lathe([
-    [0.01, 0.012],
-    [0.46, 0.02],
-    [0.62, 0.045],
-    [0.74, 0.09],
-    [0.82, 0.132],
-    [0.86, 0.156],
-    [0.82, 0.172],
-  ], 80), ceramic);
-  group.add(body);
-  const rim = new THREE.Mesh(new THREE.TorusGeometry(0.83, 0.018, 10, 80), lip);
-  rim.rotation.x = Math.PI / 2;
-  rim.position.y = 0.158;
-  group.add(rim);
-  return group;
-}
-
 function partUrl(file) {
   return new URL(`ceviche/${file}`, MODELS_DIR).href;
 }
@@ -597,17 +566,15 @@ function ensureCeviche() {
   if (glbCache.has(CEVICHE_KEY)) return Promise.resolve(glbCache.get(CEVICHE_KEY));
   if (glbPending.has(CEVICHE_KEY)) return glbPending.get(CEVICHE_KEY);
   const pending = Promise.all([
-    loadFitted(dishGlbUrl("ceviche"), 1.15).catch(() => null),
+    loadFitted(dishGlbUrl("ceviche"), 0.92).catch(() => null),
     ...CEVICHE_PARTS.map((part) => loadFitted(partUrl(part.file), 0.36).then((scene) => ({ part, scene })).catch(() => null)),
   ]).then(([foodScene, ...parts]) => {
     if (!foodScene) throw new Error("ceviche");
     const root = new THREE.Group();
     root.name = "ceviche-assembly";
     root.userData.source = "glb";
-    root.add(createServingPlate());
     const food = new THREE.Group();
     food.name = "ceviche-food";
-    food.position.y = 0.045;
     food.add(foodScene);
     root.add(food);
     const holder = new THREE.Group();

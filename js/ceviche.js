@@ -138,16 +138,17 @@ function layoutFloat(asm, camera) {
   _right.set(_forward.y, -_forward.x);
   const pieces = alive(asm);
   const count = pieces.length;
-  const spread = Math.PI * 0.92;
+  const radius = 0.34;
+  const spread = Math.PI;
   pieces.forEach((piece, index) => {
     const t = count === 1 ? 0.5 : index / (count - 1);
     const angle = -spread / 2 + t * spread;
     const bow = Math.cos(angle);
-    const lateral = Math.sin(angle) * 0.62;
-    const along = 0.06 + bow * 0.2;
+    const lateral = Math.sin(angle) * radius;
+    const along = radius * 0.42 - bow * radius;
     piece.float.set(
       _right.x * lateral + _forward.x * along,
-      0.52 + bow * 0.05,
+      0.3 + bow * 0.16,
       _right.y * lateral + _forward.y * along,
     );
   });
@@ -178,7 +179,7 @@ function startOpen(asm, camera, lang) {
     piece.from.copy(fromPlate ? ORIGIN : piece.node.position);
     piece.to.copy(piece.float);
     piece.scaleFrom = fromPlate ? 0.2 : piece.node.scale.x;
-    piece.scaleTo = 1;
+    piece.scaleTo = 0.62;
     piece.node.visible = true;
     if (fromPlate) {
       piece.node.position.copy(ORIGIN);
@@ -200,7 +201,7 @@ function finishOpen(asm) {
   for (const piece of alive(asm)) {
     piece.node.visible = true;
     piece.node.position.copy(piece.float);
-    piece.node.scale.setScalar(1);
+    piece.node.scale.setScalar(0.62);
   }
 }
 
